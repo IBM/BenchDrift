@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg
+*.egg-info/
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+*.whl
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+*-checkpoint.ipynb
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+._*
+Thumbs.db
+*.tmp
+
+# Pipeline outputs (keep structure, ignore data)
+logs/*.log
+demo_output*.json
+*_output.json
+*_metadata.json
+test_*.json
+
+# Model artifacts
+*.pkl
+*.pth
+*.bin
+*.ckpt
+
+# Data files (large outputs)
+*.csv
+data/*.json
+data/*.jsonl
+
+# Generated figures
+figures/*.jpg
+figures/*.pdf
+
+# Duplicate config
+notebooks/config/

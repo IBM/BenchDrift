@@ -1,0 +1,78 @@
+# Model Configuration for Synthesis Quality Detector
+# Defines which client and model to use for different tasks
+
+# Default client preference order
+default_client_preference: ["rits", "vllm", "gemini"]
+
+# Model mappings: which client to use for which models
+model_client_mapping:
+  # RITS Models (use RITSClient)
+  "granite-3-1-8b": "rits"
+  "granite-3-0-8b": "rits" 
+  "granite-3-3-8b": "rits"
+  "phi-4": "rits"
+  "phi-4-reasoning": "rits"
+  "microsoft/Phi-4-reasoning": "rits"
+  "franconia": "rits"
+  "llama-3-1-8b": "rits"
+  "llama_3_3_70b": "rits"
+  "openoss": "rits"
+  "gpt_oss_20b": "rits"
+  "mistral_small_3_2_instruct": "rits"
+  "qwen_3_8b": "rits"
+  "granite-4-small": "rits"
+  "granite-4-micro": "rits"
+  "granite-4-8b": "rits"
+  
+  # VLLM Models (use VLLMClient)
+  "microsoft/phi-4": "vllm"
+  "meta-llama/Llama-3.1-8B-Instruct": "vllm"
+  
+  # Gemini Models (use GeminiClient)
+  "gemini-1.5-flash": "gemini"
+  "gemini-1.5-pro": "gemini"
+
+# Task-specific model configurations
+variation_generation:
+  default_model: "openoss"              # gpt-oss-120b - better for creative variations
+  default_client: "rits"
+  fallback_models: 
+    - "granite-3-1-8b"
+    - "phi-4-reasoning"
+    - "franconia"
+  
+evaluation:
+  default_model: "llama_3_3_70b"       # Llama 3.3 70B - better for evaluation
+  default_client: "rits"
+  fallback_models:
+    - "phi-4-reasoning"
+    - "granite-3-1-8b"
+    - "franconia"
+
+judge_model:
+  default_model: "llama_3_3_70b"
+  default_client: "rits"
+  fallback_models:
+    - "granite-3-1-8b"
+
+# Client-specific settings
+client_settings:
+  rits:
+    max_workers: 50
+    max_retries: 3
+    timeout: 30
+    default_temperature: 0.1
+    default_max_tokens: 1000
+    
+  vllm:
+    tensor_parallel_size: 1
+    max_model_len: 8192
+    gpu_memory_utilization: 0.90
+    trust_remote_code: true
+    default_temperature: 0.1
+    default_max_tokens: 1000
+    
+  gemini:
+    default_temperature: 0.1
+    default_max_tokens: 1000
+    safety_settings: "default"
