@@ -1164,7 +1164,8 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
 
         # PART 1: Generate generic transformations (cross-problem batched for max efficiency)
         # User can enable/disable independently from CAGrad
-        if use_generic:
+        use_persona = self.config.get('use_persona', False)
+        if use_generic or use_persona:
             self.logger.debug(f"      🔄 Part 1: Generic transformations (cross-problem batched)...")
             generic_variations_map = self._batch_generic_transformations_cross_problem(problem_data, engine)
         else:
