@@ -5,26 +5,34 @@
 
 set -e  # Exit on any error
 
+# Model mappings (short name -> HuggingFace path)
+declare -A MODEL_PATHS
+MODEL_PATHS["phi-4"]="microsoft/phi-4"
+MODEL_PATHS["qwen3-8b"]="Qwen/Qwen3-8B"
+MODEL_PATHS["mistral-7b"]="mistralai/Mistral-7B-Instruct-v0.2"
+MODEL_PATHS["granite-3.3-8b"]="ibm-granite/granite-3.3-8b-instruct"
+MODEL_PATHS["gpt-oss-20b"]="openai/gpt-oss-20b"
+
 # Default configuration (can be overridden via command-line)
 INPUT_FILE="demo_problems.json"
 OUTPUT_FILE="demo_output_semantic.json"
 BATCH_SIZE=50
 MAX_WORKERS=4
 CLIENT_TYPE="rits"
-MODEL_NAME="phi-4"
-RESPONSE_MODEL="granite-3-3-8b"
+MODEL_NAME="microsoft/phi-4"
+RESPONSE_MODEL="ibm-granite/granite-3.3-8b-instruct"
 JUDGE_MODEL="llama_3_3_70b"
-USE_LLM_JUDGE="true"
-RECTIFY_INVALID="true"
+USE_LLM_JUDGE="True"
+RECTIFY_INVALID="True"
 MAX_MODEL_LEN=8192
 MAX_NEW_TOKENS=1000
 EMBEDDING_MODEL="all-MiniLM-L6-v2"
 SEMANTIC_THRESHOLD=0.35
-USE_CAGRAD_DEPS="false"
-USE_GENERIC="true"
-USE_CLUSTER_VARIATIONS="true"
-USE_PERSONA="false"
-USE_LONG_CONTEXT="false"
+USE_CAGRAD_DEPS="False"
+USE_GENERIC="True"
+USE_CLUSTER_VARIATIONS="True"
+USE_PERSONA="False"
+USE_LONG_CONTEXT="False"
 
 # Show usage
 show_usage() {
@@ -99,11 +107,13 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --model-name)
-            MODEL_NAME="$2"
+            # Expand short model name to full path if mapping exists
+            MODEL_NAME="${MODEL_PATHS[$2]:-$2}"
             shift 2
             ;;
         --response-model)
-            RESPONSE_MODEL="$2"
+            # Expand short model name to full path if mapping exists
+            RESPONSE_MODEL="${MODEL_PATHS[$2]:-$2}"
             shift 2
             ;;
         --judge-model)
@@ -127,55 +137,55 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --use-cagrad-deps)
-            USE_CAGRAD_DEPS="true"
+            USE_CAGRAD_DEPS="True"
             shift
             ;;
         --use-generic)
-            USE_GENERIC="true"
+            USE_GENERIC="True"
             shift
             ;;
         --no-generic)
-            USE_GENERIC="false"
+            USE_GENERIC="False"
             shift
             ;;
         --use-cluster-variations)
-            USE_CLUSTER_VARIATIONS="true"
+            USE_CLUSTER_VARIATIONS="True"
             shift
             ;;
         --no-cluster-variations)
-            USE_CLUSTER_VARIATIONS="false"
+            USE_CLUSTER_VARIATIONS="False"
             shift
             ;;
         --use-persona)
-            USE_PERSONA="true"
+            USE_PERSONA="True"
             shift
             ;;
         --no-persona)
-            USE_PERSONA="false"
+            USE_PERSONA="False"
             shift
             ;;
         --use-long-context)
-            USE_LONG_CONTEXT="true"
+            USE_LONG_CONTEXT="True"
             shift
             ;;
         --no-long-context)
-            USE_LONG_CONTEXT="false"
+            USE_LONG_CONTEXT="False"
             shift
             ;;
         --use-llm-judge)
-            USE_LLM_JUDGE="true"
+            USE_LLM_JUDGE="True"
             shift
             ;;
         --no-llm-judge)
-            USE_LLM_JUDGE="false"
+            USE_LLM_JUDGE="False"
             shift
             ;;
         --rectify-invalid)
-            RECTIFY_INVALID="true"
+            RECTIFY_INVALID="True"
             shift
             ;;
         --no-rectify-invalid)
-            RECTIFY_INVALID="false"
+            RECTIFY_INVALID="False"
             shift
             ;;
         *)
@@ -214,7 +224,7 @@ echo ""
 
 # Run the pipeline using Python
 python3 << EOF
-from unified_batched_pipeline_semantic import UnifiedBatchedPipeline
+from benchdrift.pipeline.unified_batched_pipeline_semantic import UnifiedBatchedPipeline
 
 config = {
     'unified_file': '$OUTPUT_FILE',

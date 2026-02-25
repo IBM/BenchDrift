@@ -25,6 +25,7 @@ import os
 import sys
 import json
 import argparse
+import random
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Iterator
 import pandas as pd
@@ -47,6 +48,37 @@ sys.path.append(str(Path(__file__).parent))
 
 # Import from current directory's complete_variation_pipeline (uses batched engine)
 from benchdrift.pipeline.complete_variation_pipeline import UnifiedProgressivePipeline
+from benchdrift.pipeline.feature_relevance import parse_axes, TRANSFORMATION_TO_AXIS
+
+
+# Valid client types for the pipeline
+VALID_CLIENT_TYPES = {'rits', 'openai', 'vllm', 'vllm_logits', 'ollama', 'ollama_logits', 'groq'}
+
+
+def parse_model_spec(spec: str, default_client: str = None):
+    """Parse a 'client/model-id' spec into (client_type, model_name).
+
+    Accepted formats:
+        "ollama/qwen3:8b"          → ("ollama", "qwen3:8b")
+        "rits/mistral_small"       → ("rits", "mistral_small")
+        "groq/llama-3.3-70b"       → ("groq", "llama-3.3-70b")
+        "qwen3:8b"                 → (default_client, "qwen3:8b")    # bare model name
+        "mistral_small_3_2_instruct" → (default_client, "mistral_small_3_2_instruct")
+
+    Returns:
+        (client_type, model_name) tuple.  client_type may be None if no
+        slash prefix and no default_client provided.
+    """
+    if '/' in spec:
+        parts = spec.split('/', 1)
+        candidate_client = parts[0].lower()
+        model_name = parts[1]
+        if candidate_client in VALID_CLIENT_TYPES:
+            return candidate_client, model_name
+        # If not a known client type, treat the whole thing as a model name
+        # (e.g., "ibm-granite/granite-3.3-8b-instruct" is a HF model path)
+        return default_client, spec
+    return default_client, spec
 
 
 class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
@@ -60,13 +92,18 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
         self.max_combinations = config.get('max_combinations', DEFAULT_MAX_COMBINATIONS)
         self.rectify_invalid = config.get('rectify_invalid', False)  # Default: drop invalid variations
 
-        # VLLM singleton: Create shared model client to avoid multiple GPU initializations
-        self._shared_vllm_client = None
+        # Client cache: Reuse clients to avoid multiple GPU initializations (especially for VLLM)
+        # Key: model_name, Value: client instance
+        self._client_cache = {}
         self._client_type = config.get('client_type', 'rits')
         self._model_name = config.get('model_name')
 
         # Semantic clustering configuration
         self.use_cagrad_dependencies = config.get('use_cagrad_dependencies', False)  # Optional CAGrad after clustering
+
+        # Relevance selection configuration (v2 feature — LLM-ranked ordering)
+        self.use_relevance_selection = config.get('use_relevance_selection', False)
+        self.relevance_top_k = config.get('relevance_top_k', 10)
 
         # Logging configuration
         self.verbose = config.get('verbose', False)
@@ -100,35 +137,72 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
         return logger
 
     def _get_model_client_for_stage(self, stage: str):
-        """Get model client for specific stage with appropriate model."""
-        # Determine which model to use based on stage
+        """Get model client for specific stage with appropriate model.
+
+        Caches clients by model_name to avoid creating multiple instances,
+        especially important for VLLM which holds GPU memory.
+
+        Each stage can use a different client type (e.g., ollama for generation,
+        rits for responses) when models are specified with client/model format.
+        """
+        # Determine which model and client type to use based on stage
         if stage == 'variations':
             model_name = self.config.get('model_name', 'mistral_small_3_2_instruct')
+            client_type = self._client_type
         elif stage == 'validation':
-            # Use judge model for validation (same as evaluation)
             model_name = self.config.get('judge_model') or self.config.get('model_name', 'mistral_small_3_2_instruct')
+            client_type = self.config.get('judge_client_type', self._client_type)
         elif stage == 'responses':
             model_name = self.config.get('response_model', 'mistral_small_3_2_instruct')
+            client_type = self.config.get('response_client_type', self._client_type)
         elif stage == 'evaluation':
             model_name = self.config.get('judge_model') or self.config.get('model_name', 'mistral_small_3_2_instruct')
+            client_type = self.config.get('judge_client_type', self._client_type)
         else:
             model_name = self.config.get('model_name', 'mistral_small_3_2_instruct')
+            client_type = self._client_type
+
+        # Check cache first - reuse existing client for same model
+        cache_key = f"{client_type}:{model_name}"
+        if cache_key in self._client_cache:
+            self.logger.debug(f"♻️  Reusing cached client for {stage}: {model_name}")
+            return self._client_cache[cache_key]
 
         # Get max_model_len and max_new_tokens from config
         max_model_len = self.config.get('max_model_len', 8192)
         max_new_tokens = self.config.get('max_new_tokens', 1000)
 
         from benchdrift.pipeline.comprehensive_variation_engine_v2 import create_model_client_for_variations
-        self.logger.debug(f"🎯 Creating model client for {stage}: {model_name} with {self._client_type}")
+        self.logger.debug(f"🎯 Creating model client for {stage}: {model_name} with {client_type}")
         self.logger.debug(f"   max_model_len: {max_model_len}, max_new_tokens: {max_new_tokens}")
 
         # Store max_new_tokens in model_config for create_model_client_for_variations to use
         from benchdrift.models.model_config_manager import ModelConfigManager
         model_config = ModelConfigManager()
-        client_settings = model_config.get_client_settings(self._client_type)
+        client_settings = model_config.get_client_settings(client_type)
         client_settings['max_new_tokens'] = max_new_tokens
 
-        return create_model_client_for_variations(self._client_type, model_name, max_model_len)
+        # Create client and cache it
+        client = create_model_client_for_variations(client_type, model_name, max_model_len)
+        self._client_cache[cache_key] = client
+        self.logger.debug(f"💾 Cached client for {cache_key}")
+
+        return client
+
+    def stage0_relevance_selection(self):
+        """
+        Stage 0: Relevance selection (now handled inline in Stage 1).
+
+        LLM-based relevance ranking is performed directly during variation
+        generation in _batch_generic_transformations_cross_problem(). This
+        method is kept for backward compatibility with callers that invoke
+        stage0 explicitly.
+        """
+        if not self.use_relevance_selection:
+            self.logger.info("⏭️  Relevance selection disabled, skipping Stage 0")
+            return
+
+        self.logger.info(f"\n🔍 Stage 0: LLM relevance ranking will run inline during Stage 1 (top_k={self.relevance_top_k})")
 
     def stage1_generate_variations_batched(self):
         """Stage 1: Generate variations in batches."""
@@ -160,11 +234,13 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
         if not hasattr(self, '_candidates_pre_detected'):
             self.logger.debug(f"📂 Loaded {len(problems)} input problems")
 
-        # Limit problems if max_problems is specified
+        # Limit problems if max_problems is specified (random sample with fixed seed)
         max_problems = self.config.get('max_problems')
         if max_problems and max_problems < len(problems):
+            random.seed(42)
+            random.shuffle(problems)
             problems = problems[:max_problems]
-            self.logger.debug(f"🔢 Limited to {max_problems} problems (--max-problems {max_problems})")
+            self.logger.debug(f"🔢 Randomly sampled {max_problems} problems (--max-problems {max_problems}, seed=42)")
 
         # Process in batches
         num_batches = math.ceil(len(problems) / self.batch_size)
@@ -244,10 +320,18 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
         - Either rectifies invalid variations OR drops them (based on --rectify-invalid flag)
         - Saves validated results back to unified file
 
+        Supports --validation-method: single (default), council (multi-judge), none (skip).
+
         Usage: python unified_batched_pipeline.py --stage validation --unified-file results.json
         """
+        # Check if validation is disabled via --validation-method none
+        if self.config.get('skip_validation') or self.config.get('validation_method') == 'none':
+            self.logger.info(f"⏭️  Validation skipped (--validation-method none)")
+            return
+
         self.logger.debug(f"\n🔄 VALIDATION STAGE: Validating All Variations...")
-        self.logger.debug(f"   This stage validates ALL variation types: generic, combinations, direct, etc.")
+        method = self.config.get('validation_method', 'single')
+        self.logger.debug(f"   Method: {method} | Validates ALL variation types: generic, combinations, direct, etc.")
         stage_start_time = time.time()
 
         # Load existing data from unified file (completely standalone - no dependency on stage 1)
@@ -309,10 +393,29 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
 
         self.logger.debug(f"🔍 Validating {sum(len(v[1]) for v in problems_with_variations)} variations across {len(problems_with_variations)} problems...")
 
-        # Step 1: Global validation (batched across all problems)
-        # Add progress bar for validation
-        validation_iterator = tqdm(range(1), desc='Validating variations', disable=self.verbose) if not self.verbose else range(1)
-        for _ in validation_iterator:
+        # Step 1: Global validation (TRUE cross-problem batching)
+        # Check if council-based validation is enabled
+        use_council = self.config.get('use_council', False)
+
+        if use_council:
+            # COUNCIL-BASED VALIDATION (multiple judges via OpenRouter)
+            self.logger.debug(f"🏛️  Using COUNCIL-based validation")
+            from benchdrift.pipeline.council_validator import council_validate_variations
+
+            # Extract ground truths for each problem
+            ground_truths = [baseline_problems[pid]['ground_truth'] for pid in problem_id_map]
+
+            invalid_by_problem = council_validate_variations(
+                problems_with_variations=problems_with_variations,
+                ground_truths=ground_truths,
+                api_key=self.config.get('openrouter_api_key'),
+                council_models=self.config.get('council_models'),
+                chairman_model=self.config.get('chairman_model'),
+                batch_size=self.config.get('council_batch_size', 10)
+            )
+        else:
+            # SINGLE-JUDGE VALIDATION (original behavior)
+            # Progress bar is inside _batch_validate_all_variations
             invalid_by_problem = engine._batch_validate_all_variations(problems_with_variations, batch_size=self.batch_size)
 
         # Step 2: Handle invalid variations based on rectify_invalid flag
@@ -426,11 +529,13 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
 
         self.logger.debug(f"📂 Loaded {len(problems)} input problems")
 
-        # Limit problems if specified
+        # Limit problems if specified (random sample with fixed seed)
         max_problems = self.config.get('max_problems')
         if max_problems and max_problems < len(problems):
+            random.seed(42)
+            random.shuffle(problems)
             problems = problems[:max_problems]
-            self.logger.debug(f"🔢 Limited to {max_problems} problems (--max-problems {max_problems})")
+            self.logger.debug(f"🔢 Randomly sampled {max_problems} problems (--max-problems {max_problems}, seed=42)")
 
         # Process in batches - CANDIDATE DETECTION ONLY
         num_batches = math.ceil(len(problems) / self.batch_size)
@@ -755,6 +860,8 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
                         'candidates': [],
                         'candidate_detection_complete': True,
                         'detection_error': str(inner_e),
+                        'is_baseline': True,
+                        'is_variant': False,
                         'timestamp': datetime.now().isoformat()
                     })
 
@@ -965,13 +1072,13 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
         # Always create model client for variations stage (needed for combination-based variations)
         model_client = self._get_model_client_for_stage('variations')
 
-        # TEST API CONNECTION (only for RITS, once per batch)
-        if self._client_type == 'rits' and hasattr(model_client, 'test_api_connection'):
+        # TEST API CONNECTION (for remote/local API backends, once per batch)
+        if self._client_type in ('rits', 'ollama', 'ollama_logits') and hasattr(model_client, 'test_api_connection'):
             if not hasattr(self, '_api_tested') or not self._api_tested:
                 self.logger.debug(f"\n    🔍 Testing API connection before starting variation generation...")
                 api_ok = model_client.test_api_connection()
                 if not api_ok:
-                    raise RuntimeError(f"❌ RITS API connection test failed! Cannot proceed with variation generation.")
+                    raise RuntimeError(f"❌ API connection test failed for {self._client_type}! Cannot proceed with variation generation.")
                 self._api_tested = True
                 self.logger.debug(f"    ✅ API test passed - proceeding with variation generation\n")
 
@@ -1159,17 +1266,15 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
 
         all_variations_map = {}
         use_cagrad = self.config.get('use_cagrad', False)
-        # Configurable: user can choose to generate generic variations (default: True)
-        use_generic = self.config.get('use_generic', True)
+        enabled_axes = self.config.get('enabled_axes', set())
 
-        # PART 1: Generate generic transformations (cross-problem batched for max efficiency)
-        # User can enable/disable independently from CAGrad
-        use_persona = self.config.get('use_persona', False)
-        if use_generic or use_persona:
-            self.logger.debug(f"      🔄 Part 1: Generic transformations (cross-problem batched)...")
+        # PART 1: Generate taxonomy-axis transformations (cross-problem batched)
+        # The axis filter inside _batch_generic_transformations_cross_problem handles enabled_axes
+        if enabled_axes:
+            self.logger.debug(f"      🔄 Part 1: Taxonomy-axis transformations (cross-problem batched)...")
             generic_variations_map = self._batch_generic_transformations_cross_problem(problem_data, engine)
         else:
-            self.logger.debug(f"      ⏭️  Part 1: Skipping generic transformations (use_generic=False)...")
+            self.logger.debug(f"      ⏭️  Part 1: Skipping taxonomy transformations (no axes enabled)...")
             generic_variations_map = {}
 
         # PART 2: Generate cluster-based variations (using semantic clusters from Stage 0)
@@ -1184,12 +1289,11 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
             cluster_variations_map = {}
 
         # PART 3: Generate long context variations (for prompts >500 chars)
-        use_long_context = self.config.get('use_long_context', False)
-        if use_long_context:
+        if 'long_context' in enabled_axes:
             self.logger.debug(f"      🔄 Part 3: Long context variations (for prompts >500 chars)...")
             long_context_variations_map = self._batch_long_context_variations(problem_data, engine)
         else:
-            self.logger.debug(f"      ⏭️  Part 3: Skipping long context variations (use_long_context=False)...")
+            self.logger.debug(f"      ⏭️  Part 3: Skipping long context variations (long_context axis not enabled)...")
             long_context_variations_map = {}
 
         # Combine all results by problem
@@ -1218,28 +1322,71 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
         from benchdrift.pipeline.unified_variation_engine_batched import UnifiedVariationEngine
         all_transformation_types = UnifiedVariationEngine.get_all_transformation_types()
 
-        # Filter based on flags
+        # Filter based on enabled_axes
+        enabled_axes = self.config.get('enabled_axes')
         transformation_types = {}
-        use_generic = self.config.get('use_generic', True)
-        use_persona = self.config.get('use_persona', False)
 
         for trans_type, config in all_transformation_types.items():
-            is_persona = trans_type.endswith('_persona')
-
-            # Include if:
-            # - It's a persona and use_persona is True, OR
-            # - It's NOT a persona and use_generic is True
-            if (is_persona and use_persona) or (not is_persona and use_generic):
+            axis = TRANSFORMATION_TO_AXIS.get(trans_type)
+            if axis and (enabled_axes is None or axis in enabled_axes):
                 transformation_types[trans_type] = config
 
-        # Count persona vs generic types
-        persona_count = sum(1 for t in transformation_types.keys() if t.endswith('_persona'))
-        generic_count = len(transformation_types) - persona_count
-        self.logger.debug(f"        📋 Using {generic_count} generic + {persona_count} persona types ({len(transformation_types)} total)...")
-        if not use_generic:
-            self.logger.debug(f"        ⚠️  Generic transformations DISABLED")
-        if not use_persona:
-            self.logger.debug(f"        ⚠️  Persona transformations DISABLED")
+        # Log axis breakdown
+        axis_counts = {}
+        for t in transformation_types:
+            ax = TRANSFORMATION_TO_AXIS.get(t, "unknown")
+            axis_counts[ax] = axis_counts.get(ax, 0) + 1
+        axes_summary = ", ".join(f"{ax}={n}" for ax, n in sorted(axis_counts.items()))
+        self.logger.debug(f"        📋 Using {len(transformation_types)} transformations ({axes_summary})...")
+
+        # Relevance selection: zero-cost feature-based ranking per problem
+        use_relevance = self.use_relevance_selection
+        relevance_top_k = self.relevance_top_k
+        per_problem_ranked_order = {}  # problem_idx -> list of trans names in ranked order
+
+        if use_relevance:
+            from benchdrift.pipeline.feature_relevance import rank_transformations as feature_rank
+            self.logger.info(f"        🔍 Feature-based relevance ranking for {len(problem_data)} problems (zero-cost, instant)...")
+
+            relevance_diagnostics = []
+            for problem_idx, problem_info in enumerate(problem_data):
+                ranked = feature_rank(problem_info['problem_text'], transformation_types,
+                                      enabled_axes=enabled_axes)
+                per_problem_ranked_order[problem_idx] = [name for name, _score in ranked]
+
+                # Build diagnostic entry
+                problem_id = problem_info.get('problem_id', f'problem_{problem_idx}')
+                applied = [name for name, _s in ranked[:relevance_top_k]] if relevance_top_k > 0 else [name for name, _s in ranked]
+                skipped = [name for name, _s in ranked[relevance_top_k:]] if relevance_top_k > 0 else []
+
+                diag = {
+                    'problem_id': problem_id,
+                    'problem_preview': problem_info['problem_text'][:120],
+                    'ranked_order': [(name, round(score, 3)) for name, score in ranked],
+                    'applied': applied,
+                    'skipped': skipped,
+                }
+                relevance_diagnostics.append(diag)
+
+                top5 = ", ".join(f"{name}({score:.2f})" for name, score in ranked[:5])
+                self.logger.info(f"          [{problem_id}] Top-5: {top5}")
+
+            # Summary
+            if relevance_top_k > 0:
+                total_requests = len(problem_data) * relevance_top_k
+            else:
+                total_requests = len(problem_data) * len(transformation_types)
+            brute_force = len(problem_data) * len(transformation_types)
+            self.logger.info(f"        ✅ Feature ranking done: generating {'top-' + str(relevance_top_k) if relevance_top_k > 0 else 'all ' + str(len(transformation_types))} per problem ({total_requests} total, was {brute_force} unranked)")
+
+            # Write diagnostic report
+            try:
+                diag_path = self.unified_file.replace('.json', '_relevance_diagnostics.json')
+                with open(diag_path, 'w') as f:
+                    json.dump(relevance_diagnostics, f, indent=2)
+                self.logger.info(f"        📊 Relevance diagnostics: {diag_path}")
+            except Exception as e:
+                self.logger.debug(f"        Could not write diagnostics file: {e}")
 
         # Collect all generic transformation requests
         all_system_prompts = []
@@ -1249,7 +1396,19 @@ class UnifiedBatchedPipeline(UnifiedProgressivePipeline):
         for problem_idx, problem_info in enumerate(problem_data):
             problem_text = problem_info['problem_text']
 
-            for trans_type, config in transformation_types.items():
+            # Determine iteration order: ranked if available, else default dict order
+            if use_relevance and problem_idx in per_problem_ranked_order:
+                ranked = per_problem_ranked_order[problem_idx]
+                # Apply top_k cutoff if set (0 means all)
+                if relevance_top_k > 0:
+                    active_order = ranked[:relevance_top_k]
+                else:
+                    active_order = ranked
+            else:
+                active_order = list(transformation_types.keys())
+
+            for trans_type in active_order:
+                config = transformation_types[trans_type]
                 system_prompt = f"""You are an expert at creating question variations that test specific cognitive capabilities.
 
 TASK: Create a {trans_type} variation of the given problem.
@@ -1326,7 +1485,8 @@ Generate ONE high-quality {trans_type} variation."""
                             'original_component': trans_type,
                             'new_component': f'{trans_type}_variation',
                             'combination_size': 0,
-                            'cross_domain': False
+                            'cross_domain': False,
+                            'relevance_selected': use_relevance,
                         }
 
                         if problem_idx not in generic_variations_map:
@@ -1488,10 +1648,8 @@ OUTPUT FORMAT:
 
         # Execute batch call for LLM-based variations (chunked by batch_size)
         if len(all_system_prompts) == 0:
-            self.logger.debug(f"        ℹ️  No long context variations to generate")
-            return {}
-
-        long_context_variations_map = {}
+            self.logger.debug(f"        ℹ️  No LLM long context variations to generate")
+            return long_context_variations_map
 
         try:
             if hasattr(engine.model_client, 'get_model_response'):
@@ -3831,8 +3989,8 @@ Create ONE variation using EXACTLY the specified transformations while preservin
 
         # 1. GENERIC TRANSFORMATIONS
         transformation_types = {
-            'counterfactual': {
-                'prompt': "Create a counterfactual version by changing the scenario context while keeping the exact same numerical values and mathematical relationships to preserve the identical answer.",
+            'hypothetical_framing': {
+                'prompt': "Reframe this problem using hypothetical language (e.g., 'what if', 'suppose', 'imagine') while keeping ALL conditions, numbers, entities, and relationships identical. Only change the framing — do NOT change any conditions. The answer must remain exactly the same.",
                 'capability': 'context_preservation'
             },
             'interrogative_expansion': {
@@ -4254,8 +4412,8 @@ Generate {variants_per_candidate} high-quality alternatives optimized for in-pla
 
         # Transformation types from the original engine
         transformation_types = {
-            'counterfactual': {
-                'prompt': "Create a counterfactual version by changing the scenario context while keeping the exact same numerical values and mathematical relationships to preserve the identical answer.",
+            'hypothetical_framing': {
+                'prompt': "Reframe this problem using hypothetical language (e.g., 'what if', 'suppose', 'imagine') while keeping ALL conditions, numbers, entities, and relationships identical. Only change the framing — do NOT change any conditions. The answer must remain exactly the same.",
                 'capability': 'context_preservation'
             },
             'interrogative_expansion': {
@@ -4571,21 +4729,21 @@ Create ONE variation using EXACTLY the specified transformations while preservin
 
         # Create baseline entry
         baseline_entry = {
+            # === IDENTIFICATION ===
             'problem_id': problem_id,
             'variation_id': f'{problem_id}_baseline',
             'variation_index': 0,
-            'variation_type': 'baseline',
             'is_baseline': True,
-            'is_variant': False,
+            'is_variant': False,  # Explicit for validation/evaluation stage compatibility
 
-            # Problem content
-            'original_problem': problem_text,
+            # === PROBLEM CONTENT ===
+            'original_problem': problem_text,  # baseline_problem removed (= original_problem)
             'modified_problem': problem_text,
-            'baseline_problem': problem_text,
             'ground_truth_answer': ground_truth,
 
-            # Transformation details (baseline values)
+            # === TRANSFORMATION DETAILS ===
             'transformation_type': 'baseline',
+            'variation_axis': 'baseline',  # NEW: surface_form / referential / pragmatic / structural
             'original_component': 'baseline',
             'new_component': 'baseline',
             'debugging_capability': 'baseline',
@@ -4596,53 +4754,96 @@ Create ONE variation using EXACTLY the specified transformations while preservin
             'cross_domain': False,
             'confidence': 'baseline',
 
-            # Stage tracking
-            'stages_completed': ['variations'],
+            # === CLUSTER INFO (for cluster-based variations) ===
+            'cluster_id': None,  # NEW
+            'cluster_size': 0,   # NEW
+
+            # === VARIATION GENERATION ===
+            'variation_model_name': '',  # NEW: which model generated the variation
             'variation_generation_timestamp': timestamp,
 
-            # Response placeholders
-            'has_model_response': False,
-            'model_response': '',
-            'model_thinking': '',
-            'model_final_answer': '',
-            'response_generation_time': 0.0,
-            'response_success': False,
-            'response_error_message': '',
-            'response_timestamp': 0,
+            # === VALIDATION ===
+            'validation_model_name': '',  # NEW: which model validated
+            'validation_passed': True,    # NEW: baseline always passes
+            'validation_attempts': 0,     # NEW
+            'validation_corrected': False,
+            'semantic_similarity_score': 1.0,  # NEW: baseline = perfect similarity
 
-            # Evaluation placeholders
-            'baseline_model_answer': '',
-            'baseline_model_thinking': '',
-            'baseline_model_response': '',
+            # === BASELINE RESPONSE (response to original_problem) ===
+            'baseline_answer': '',
+            'baseline_thinking': '',
+            'baseline_response': '',
+            'baseline_generation_time': 0.0,
             'baseline_response_success': False,
+            'baseline_response_error': '',
+            'baseline_response_timestamp': 0,
+
+            # === VARIANT RESPONSE (response to modified_problem) ===
+            # For baseline entries, variant response = baseline response
+            'variant_answer': '',
+            'variant_thinking': '',
+            'variant_response': '',
+            'variant_generation_time': 0.0,
+            'variant_response_success': False,
+            'variant_response_error': '',
+            'variant_response_timestamp': 0,
+
+            # === RESPONSE GENERATION LOGIT STATISTICS ===
+            'response_mean_logprob': 0.0,
+            'response_min_logprob': 0.0,
+            'response_max_logprob': 0.0,
+            'response_mean_entropy': 0.0,
+            'response_max_entropy': 0.0,
+            'response_mean_top1_prob': 0.0,
+            'response_first_token_logprob': 0.0,
+            'response_first_token_prob': 0.0,
+            'response_num_tokens': 0,
+            'response_token_logprobs': [],  # Full per-token top-k logprobs
+
+            # === EVALUATION & DRIFT ===
             'baseline_matches_ground_truth': False,
             'variant_matches_ground_truth': False,
+            'baseline_confidence': '',
+            'variant_confidence': '',
+            'baseline_explanation': '',
+            'variant_explanation': '',
+            'evaluation_method': '',
             'baseline_variant_consistent': False,
+            'positive_drift': False,  # has_improvement removed (= positive_drift)
+            'negative_drift': False,
             'has_drift': False,
-            'has_improvement': False
+
+            # === METADATA ===
+            'problem_length_chars': len(problem_text),
+            'target_model_name': self.config.get('target_model_name', ''),
+            'judge_model_name': '',
+            'benchmark_name': self.config.get('benchmark_name', ''),
+            'problem_category': '',
+            'stages_completed': ['variations']
         }
         self.data.append(baseline_entry)
 
         # Create variant entries
         for j, variation in enumerate(variations):
+            modified_text = variation.get('modified_problem', '')
             variant_entry = {
+                # === IDENTIFICATION ===
                 'problem_id': problem_id,
                 'variation_id': f'{problem_id}_variant_{j+1}',
                 'variation_index': j + 1,
-                'variation_type': 'variant',
                 'is_baseline': False,
-                'is_variant': True,
+                'is_variant': True,  # Explicit for validation/evaluation stage compatibility
                 'variant_number': j + 1,
                 'total_variants_for_problem': len(variations),
 
-                # Problem content
-                'original_problem': problem_text,
-                'modified_problem': variation.get('modified_problem', ''),
-                'baseline_problem': problem_text,
+                # === PROBLEM CONTENT ===
+                'original_problem': problem_text,  # baseline_problem removed (= original_problem)
+                'modified_problem': modified_text,
                 'ground_truth_answer': ground_truth,
 
-                # Transformation details from variation
+                # === TRANSFORMATION DETAILS ===
                 'transformation_type': variation.get('transformation_type', ''),
+                'variation_axis': variation.get('variation_axis', ''),  # NEW: surface_form / referential / pragmatic / structural
                 'original_component': variation.get('original_component', ''),
                 'new_component': variation.get('new_component', ''),
                 'debugging_capability': variation.get('debugging_capability', ''),
@@ -4656,30 +4857,73 @@ Create ONE variation using EXACTLY the specified transformations while preservin
                 'selected_variants': variation.get('selected_variants', []),
                 'transformation_details': variation.get('transformation_details', {}),
 
-                # Stage tracking
-                'stages_completed': ['variations'],
+                # === CLUSTER INFO (for cluster-based variations) ===
+                'cluster_id': variation.get('cluster_id', None),  # NEW
+                'cluster_size': variation.get('cluster_size', 0),  # NEW
+
+                # === VARIATION GENERATION ===
+                'variation_model_name': self.config.get('model_name', ''),  # NEW
                 'variation_generation_timestamp': timestamp,
 
-                # Response placeholders
-                'has_model_response': False,
-                'model_response': '',
-                'model_thinking': '',
-                'model_final_answer': '',
-                'response_generation_time': 0.0,
-                'response_success': False,
-                'response_error_message': '',
-                'response_timestamp': 0,
+                # === VALIDATION ===
+                'validation_model_name': '',  # NEW: populated during validation stage
+                'validation_passed': False,   # NEW: updated during validation
+                'validation_attempts': 0,     # NEW
+                'validation_corrected': False,
+                'semantic_similarity_score': variation.get('semantic_similarity_score', 0.0),  # NEW
 
-                # Evaluation placeholders
-                'baseline_model_answer': '',
-                'baseline_model_thinking': '',
-                'baseline_model_response': '',
+                # === BASELINE RESPONSE (response to original_problem) ===
+                # Populated from baseline entry during response generation
+                'baseline_answer': '',
+                'baseline_thinking': '',
+                'baseline_response': '',
+                'baseline_generation_time': 0.0,
                 'baseline_response_success': False,
+                'baseline_response_error': '',
+                'baseline_response_timestamp': 0,
+
+                # === VARIANT RESPONSE (response to modified_problem) ===
+                'variant_answer': '',
+                'variant_thinking': '',
+                'variant_response': '',
+                'variant_generation_time': 0.0,
+                'variant_response_success': False,
+                'variant_response_error': '',
+                'variant_response_timestamp': 0,
+
+                # === RESPONSE GENERATION LOGIT STATISTICS ===
+                'response_mean_logprob': 0.0,
+                'response_min_logprob': 0.0,
+                'response_max_logprob': 0.0,
+                'response_mean_entropy': 0.0,
+                'response_max_entropy': 0.0,
+                'response_mean_top1_prob': 0.0,
+                'response_first_token_logprob': 0.0,
+                'response_first_token_prob': 0.0,
+                'response_num_tokens': 0,
+                'response_token_logprobs': [],  # Full per-token top-k logprobs
+
+                # === EVALUATION & DRIFT ===
                 'baseline_matches_ground_truth': False,
                 'variant_matches_ground_truth': False,
+                'baseline_confidence': '',
+                'variant_confidence': '',
+                'baseline_explanation': '',
+                'variant_explanation': '',
+                'evaluation_method': '',
                 'baseline_variant_consistent': False,
+                'positive_drift': False,  # has_improvement removed (= positive_drift)
+                'negative_drift': False,
                 'has_drift': False,
-                'has_improvement': False
+
+                # === METADATA ===
+                'problem_length_chars': len(problem_text),
+                'variation_length_chars': len(modified_text),
+                'target_model_name': self.config.get('target_model_name', ''),
+                'judge_model_name': '',
+                'benchmark_name': self.config.get('benchmark_name', ''),
+                'problem_category': '',
+                'stages_completed': ['variations']
             }
             self.data.append(variant_entry)
 
@@ -4912,16 +5156,19 @@ Examples:
                        help='Save after every batch (default: True)')
 
     # Configuration
-    parser.add_argument('--client-type', default='rits', choices=['rits', 'openai','vllm'],
-                       help='Model client type (default: rits)')
+    parser.add_argument('--client-type', default='rits',
+                       choices=['rits', 'openai', 'vllm', 'vllm_logits', 'ollama', 'ollama_logits', 'groq'],
+                       help='Model client type (default: rits). Optional when using client/model format in --model-name.')
     parser.add_argument('--model-name', default='mistral_small_3_2_instruct',
-                       help='Model for variation generation (default: mistral_small_3_2_instruct)')
+                       help='Generator model. Accepts "client/model" format (e.g., ollama/qwen3:8b) '
+                            'or bare name (default: mistral_small_3_2_instruct)')
     parser.add_argument('--response-model', default='mistral_small_3_2_instruct',
-                       help='Model for response generation (default: mistral_small_3_2_instruct)')
+                       help='Target model for response generation. Accepts "client/model" format '
+                            '(default: mistral_small_3_2_instruct)')
     parser.add_argument('--use-llm-judge', action='store_true',
                        help='Use LLM judge for answer evaluation (default: string matching)')
     parser.add_argument('--judge-model', default=None,
-                       help='Model to use as LLM judge (default: same as model-name)')
+                       help='Judge model. Accepts "client/model" format (default: same as model-name)')
     parser.add_argument('--disable-cot', action='store_true',
                        help='Disable chain-of-thought reasoning for faster response generation')
     parser.add_argument('--force-regenerate', action='store_true',
@@ -4944,18 +5191,21 @@ Examples:
                        # help='Use optimized LLM-guided selector')
 
     # Variation type configuration
-    parser.add_argument('--use-generic', action='store_true', default=True, dest='use_generic',
-                       help='Generate generic transformations (counterfactual, rephrasing, etc.) (default: True)')
-    parser.add_argument('--no-generic', action='store_false', dest='use_generic',
-                       help='Skip generic transformations - use only cluster-based variations')
+    parser.add_argument('--use-axes', type=str,
+                       default='linguistic,referential,pragmatic,structural,constraint_targeted',
+                       help='Comma-separated taxonomy axes to enable. '
+                            'Valid: linguistic,referential,pragmatic,structural,persona,long_context,constraint_targeted,all. '
+                            'Subtract with minus: "all,-persona". (default: all non-persona/non-long_context)')
     parser.add_argument('--use-cluster-variations', action='store_true', default=True, dest='use_cluster_variations',
                        help='Generate cluster-based/decomposition variations from semantic clusters (default: True)')
     parser.add_argument('--no-cluster-variations', action='store_false', dest='use_cluster_variations',
-                       help='Skip cluster-based variations - use only generic/persona/long-context')
-    parser.add_argument('--use-persona', action='store_true', default=False,
-                       help='Generate persona-based variations (different perspectives/roles) (default: False)')
-    parser.add_argument('--use-long-context', action='store_true', default=False,
-                       help='Generate long-context variations for prompts >500 chars (structure/formatting/clarity) (default: False)')
+                       help='Skip cluster-based variations - use only taxonomy axis variations')
+
+    # Relevance selection (v2 key feature)
+    parser.add_argument('--use-relevance-selection', action='store_true', default=False,
+                       help='LLM-rank transformations by relevance per problem (most impactful first)')
+    parser.add_argument('--relevance-top-k', type=int, default=10,
+                       help='Generate only top-k ranked transformations per problem (0 = all, in ranked order)')
 
     # CAGrad configuration
     parser.add_argument('--use-cagrad', action='store_true',
@@ -5010,23 +5260,80 @@ Examples:
     parser.add_argument('--multi-signal-scoring', action='store_true', default=True,
                        help='Use multi-signal scoring (gradient + structural + diversity) for neyman_facility')
 
+    # Logging and debugging
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='Enable verbose/debug logging output (default: False)')
+    parser.add_argument('--use-cagrad-dependencies', action='store_true',
+                       help='Apply CAGrad dependencies after semantic clustering for variation generation (default: False)')
+
+    # Validation method
+    parser.add_argument('--validation-method', choices=['single', 'council', 'none'], default='single',
+                       help='Validation method: single (1 judge), council (multi-judge via OpenRouter), '
+                            'none (skip validation). Overrides --use-council. (default: single)')
+    # Council-based validation (uses OpenRouter API)
+    parser.add_argument('--use-council', action='store_true',
+                       help='DEPRECATED: Use --validation-method council instead.')
+    parser.add_argument('--council-models', type=str, default='openai/gpt-4o-mini,anthropic/claude-3-haiku,google/gemini-flash-1.5',
+                       help='Comma-separated list of OpenRouter model IDs for council judges '
+                            '(default: openai/gpt-4o-mini,anthropic/claude-3-haiku,google/gemini-flash-1.5)')
+    parser.add_argument('--chairman-model', type=str, default='openai/gpt-4o',
+                       help='OpenRouter model ID for the council chairman (default: openai/gpt-4o)')
+    parser.add_argument('--openrouter-api-key', type=str, default=None,
+                       help='OpenRouter API key (or set OPENROUTER_API_KEY env var)')
+    parser.add_argument('--council-batch-size', type=int, default=10,
+                       help='Number of variations to validate in parallel with council (default: 10)')
+
     # Output
     parser.add_argument('--csv-output',
                        help='CSV output path (default: unified_file.csv)')
 
     args = parser.parse_args()
 
+    # ── Resolve client/model-id specs ──
+    # Parse --model-name, --response-model, --judge-model for "client/model" format.
+    # Any of these can override --client-type when using the slash format.
+    _gen_client, args.model_name = parse_model_spec(args.model_name, args.client_type)
+    _resp_client, args.response_model = parse_model_spec(args.response_model, args.client_type)
+    _judge_client = None
+    if args.judge_model:
+        _judge_client, args.judge_model = parse_model_spec(args.judge_model, args.client_type)
+
+    # The generator model's client takes precedence for the pipeline-wide client_type
+    if _gen_client and _gen_client in VALID_CLIENT_TYPES:
+        args.client_type = _gen_client
+
+    # Store per-role client types for stages that use different backends
+    args._response_client_type = _resp_client or args.client_type
+    args._judge_client_type = _judge_client or args.client_type
+
     # Validation
     if args.all_stages and not args.input:
-        self.logger.debug("🧪 No --input specified, will use hardcoded test example")
+        print("🧪 No --input specified, will use hardcoded test example")
         args.input = 'test'  # Set to trigger test mode
 
     if args.stage == 'variations' and not args.input:
-        self.logger.debug("🧪 No --input specified, will use hardcoded test example")
+        print("🧪 No --input specified, will use hardcoded test example")
         args.input = 'test'  # Set to trigger test mode
 
     # Configuration
     response_eval_batch_size = args.response_eval_batch_size or args.batch_size
+
+    # Derive metadata from existing arguments
+    # target_model_name: extract model name from response_model path (e.g., "ibm-granite/granite-3.3-8b-instruct" -> "granite-3.3-8b-instruct")
+    target_model_name = args.response_model.split('/')[-1] if args.response_model else ''
+    # benchmark_name: extract from input path (e.g., "data/gsm8k/test.jsonl" -> "gsm8k")
+    benchmark_name = ''
+    if args.input and args.input != 'test':
+        import os
+        input_parts = args.input.replace('\\', '/').split('/')
+        # Look for benchmark name in path (typically data/<benchmark>/test.jsonl)
+        for i, part in enumerate(input_parts):
+            if part == 'data' and i + 1 < len(input_parts):
+                benchmark_name = input_parts[i + 1]
+                break
+        # Fallback: use parent directory name
+        if not benchmark_name and len(input_parts) >= 2:
+            benchmark_name = input_parts[-2]
 
     config = {
         'unified_file': args.unified_file,
@@ -5034,6 +5341,10 @@ Examples:
         'client_type': args.client_type,
         'model_name': args.model_name,
         'response_model': args.response_model,
+        'response_client_type': getattr(args, '_response_client_type', args.client_type),
+        'judge_client_type': getattr(args, '_judge_client_type', args.client_type),
+        'target_model_name': target_model_name,
+        'benchmark_name': benchmark_name,
         'num_variations': args.num_variations,
         'max_combinations': args.max_combinations,
         'max_workers': args.max_workers,
@@ -5055,10 +5366,11 @@ Examples:
         # Always use maximum batching - this is a batched pipeline!
         'use_batched_processing': True,
         # Variation type configuration
-        'use_generic': args.use_generic,
+        'enabled_axes': parse_axes(args.use_axes),
         'use_cluster_variations': args.use_cluster_variations,
-        'use_persona': args.use_persona,
-        'use_long_context': args.use_long_context,
+        # Relevance selection
+        'use_relevance_selection': args.use_relevance_selection,
+        'relevance_top_k': args.relevance_top_k,
         # CAGrad configuration
         'use_cagrad': args.use_cagrad,
         'cagrad_use_gradient_pruning': args.cagrad_use_gradient_pruning,
@@ -5079,52 +5391,61 @@ Examples:
         'ht_sampling_stage': args.ht_sampling_stage,
         'ht_confidence_level': args.ht_confidence_level,
         'coverage_penalty': args.coverage_penalty,
-        'use_multi_signal_scoring': args.multi_signal_scoring
+        'use_multi_signal_scoring': args.multi_signal_scoring,
+        # Logging and debugging
+        'verbose': args.verbose,
+        'use_cagrad_dependencies': args.use_cagrad_dependencies,
+        # Validation method: resolve --validation-method with backward-compat --use-council
+        'validation_method': args.validation_method if args.validation_method != 'single' else ('council' if args.use_council else 'single'),
+        'use_council': args.use_council or args.validation_method == 'council',
+        'skip_validation': args.validation_method == 'none',
+        'council_models': [m.strip() for m in args.council_models.split(',')] if args.council_models else None,
+        'chairman_model': args.chairman_model,
+        'openrouter_api_key': args.openrouter_api_key,
+        'council_batch_size': args.council_batch_size
     }
 
     # Initialize batched enhancer
     enhancer = UnifiedBatchedPipeline(config)
 
-    self.logger.debug(f"🚀 Unified Batched Pipeline Starting...")
-    self.logger.debug(f"   Unified file: {args.unified_file}")
-    self.logger.debug(f"   Variation batch size: {args.batch_size}")
-    self.logger.debug(f"   Response/Eval batch size: {response_eval_batch_size}")
-    self.logger.debug(f"   Max workers: {args.max_workers}")
+    enhancer.logger.debug(f"🚀 Unified Batched Pipeline Starting...")
+    enhancer.logger.debug(f"   Unified file: {args.unified_file}")
+    enhancer.logger.debug(f"   Variation batch size: {args.batch_size}")
+    enhancer.logger.debug(f"   Response/Eval batch size: {response_eval_batch_size}")
+    enhancer.logger.debug(f"   Max workers: {args.max_workers}")
 
     # Always use maximum batching approach
-    self.logger.debug(f"   Batching strategy: 🚀 Maximum batching (API + problem-level parallelization with {config['max_workers']} workers)")
+    enhancer.logger.debug(f"   Batching strategy: 🚀 Maximum batching (API + problem-level parallelization with {config['max_workers']} workers)")
 
     # Variation type info
-    self.logger.debug(f"   📋 Variation Types:")
-    self.logger.debug(f"      - Generic: {'ENABLED' if args.use_generic else 'DISABLED'}")
-    self.logger.debug(f"      - Cluster-based: {'ENABLED' if args.use_cluster_variations else 'DISABLED'} (from semantic clusters)")
-    self.logger.debug(f"      - Persona: {'ENABLED' if args.use_persona else 'DISABLED'}")
-    self.logger.debug(f"      - Long Context: {'ENABLED' if args.use_long_context else 'DISABLED'} (applies to prompts >500 chars)")
+    enhancer.logger.debug(f"   📋 Variation Types:")
+    enhancer.logger.debug(f"      Enabled axes: {', '.join(sorted(config['enabled_axes']))}")
+    enhancer.logger.debug(f"      Cluster-based entity substitution: {'ENABLED' if args.use_cluster_variations else 'DISABLED'}")
 
     # CAGrad info
     if args.use_cagrad:
-        self.logger.debug(f"   🎯 CAGrad: ENABLED (brittleness-based variation generation)")
-        self.logger.debug(f"      - Gradient pruning: {'ENABLED' if args.cagrad_use_gradient_pruning else 'DISABLED'}")
-        self.logger.debug(f"      - Counterfactuals per fragment: {args.cagrad_num_counterfactuals}")
-        self.logger.debug(f"      - Top-K fragments: {args.cagrad_top_k}")
-        self.logger.debug(f"      - Pruning threshold: {args.cagrad_pruning_threshold}")
-        self.logger.debug(f"      - Min fragments after pruning: {args.cagrad_min_fragments}")
+        enhancer.logger.debug(f"   🎯 CAGrad: ENABLED (brittleness-based variation generation)")
+        enhancer.logger.debug(f"      - Gradient pruning: {'ENABLED' if args.cagrad_use_gradient_pruning else 'DISABLED'}")
+        enhancer.logger.debug(f"      - Counterfactuals per fragment: {args.cagrad_num_counterfactuals}")
+        enhancer.logger.debug(f"      - Top-K fragments: {args.cagrad_top_k}")
+        enhancer.logger.debug(f"      - Pruning threshold: {args.cagrad_pruning_threshold}")
+        enhancer.logger.debug(f"      - Min fragments after pruning: {args.cagrad_min_fragments}")
         max_frags_str = str(args.cagrad_max_fragments) if args.cagrad_max_fragments else "None (unlimited)"
-        self.logger.debug(f"      - Max fragments after pruning: {max_frags_str}")
+        enhancer.logger.debug(f"      - Max fragments after pruning: {max_frags_str}")
     else:
-        self.logger.debug(f"   🔄 CAGrad: DISABLED (using standard combination-based generation)")
+        enhancer.logger.debug(f"   🔄 CAGrad: DISABLED (using standard combination-based generation)")
 
     # Prioritized testing info
     if args.use_prioritized_testing:
-        self.logger.debug(f"   ⚡ Prioritized Testing: ENABLED (logprob-based speedup)")
-        self.logger.debug(f"      - Test budget: {int(args.test_budget*100)}%")
-        self.logger.debug(f"      - Expected speedup: {1/args.test_budget:.1f}x")
-        self.logger.debug(f"      - Strategy: Score all with logprobs, test top {int(args.test_budget*100)}%")
+        enhancer.logger.debug(f"   ⚡ Prioritized Testing: ENABLED (logprob-based speedup)")
+        enhancer.logger.debug(f"      - Test budget: {int(args.test_budget*100)}%")
+        enhancer.logger.debug(f"      - Expected speedup: {1/args.test_budget:.1f}x")
+        enhancer.logger.debug(f"      - Strategy: Score all with logprobs, test top {int(args.test_budget*100)}%")
     else:
-        self.logger.debug(f"   🔄 Prioritized Testing: DISABLED (testing all variations)")
+        enhancer.logger.debug(f"   🔄 Prioritized Testing: DISABLED (testing all variations)")
 
     if args.input:
-        self.logger.debug(f"   Input: {args.input}")
+        enhancer.logger.debug(f"   Input: {args.input}")
 
     # Start total timing
     total_start_time = time.time()
@@ -5133,7 +5454,7 @@ Examples:
     try:
         if args.all_stages:
             # Run all stages with batching and timing
-            self.logger.debug(f"\n⏱️  Starting pipeline execution timing...")
+            enhancer.logger.debug(f"\n⏱️  Starting pipeline execution timing...")
 
             # Stage 1: Variations
             stage_start = time.time()
@@ -5172,7 +5493,7 @@ Examples:
             stage_times['validation'] = time.time() - stage_start
 
         elif args.stages_1_4:
-            self.logger.debug(f"\n⏱️  Starting stages 1-4 execution (loads candidates from unified file)...")
+            enhancer.logger.debug(f"\n⏱️  Starting stages 1-4 execution (loads candidates from unified file)...")
 
             # Set execution mode for stages 1-4
             enhancer.config['execution_mode'] = 'stages_1_4'
@@ -5214,34 +5535,34 @@ Examples:
             stage_times['csv_export'] = time.time() - stage_start
 
         else:
-            self.logger.debug("❌ Please specify --stage or --all-stages")
+            enhancer.logger.debug("❌ Please specify --stage or --all-stages")
             return 1
 
         # Calculate total time
         total_time = time.time() - total_start_time
 
         # Print timing summary
-        self.logger.debug(f"\n⏱️  PIPELINE TIMING SUMMARY")
-        self.logger.debug(f"{'='*50}")
-        self.logger.debug(f"🎯 Batching Strategy Used:")
-        self.logger.debug(f"   🚀 Automatic optimization (API + problem-level parallelization with {config['max_workers']} workers)")
+        enhancer.logger.debug(f"\n⏱️  PIPELINE TIMING SUMMARY")
+        enhancer.logger.debug(f"{'='*50}")
+        enhancer.logger.debug(f"🎯 Batching Strategy Used:")
+        enhancer.logger.debug(f"   🚀 Automatic optimization (API + problem-level parallelization with {config['max_workers']} workers)")
 
-        self.logger.debug(f"\n⏱️  Stage Execution Times:")
+        enhancer.logger.debug(f"\n⏱️  Stage Execution Times:")
         for stage, duration in stage_times.items():
             minutes = int(duration // 60)
             seconds = duration % 60
-            self.logger.debug(f"   {stage.capitalize():15} {minutes:2d}m {seconds:5.2f}s")
+            enhancer.logger.debug(f"   {stage.capitalize():15} {minutes:2d}m {seconds:5.2f}s")
 
-        self.logger.debug(f"\n⏱️  Total Pipeline Time:")
+        enhancer.logger.debug(f"\n⏱️  Total Pipeline Time:")
         total_minutes = int(total_time // 60)
         total_seconds = total_time % 60
-        self.logger.debug(f"   {'TOTAL':15} {total_minutes:2d}m {total_seconds:5.2f}s")
+        enhancer.logger.debug(f"   {'TOTAL':15} {total_minutes:2d}m {total_seconds:5.2f}s")
 
-        self.logger.info(f"\n🎉 Batched Pipeline complete!")
+        enhancer.logger.info(f"\n🎉 Batched Pipeline complete!")
         return 0
 
     except Exception as e:
-        self.logger.debug(f"❌ Pipeline failed: {e}")
+        enhancer.logger.debug(f"❌ Pipeline failed: {e}")
         import traceback
         traceback.print_exc()
         return 1

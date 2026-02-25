@@ -53,7 +53,9 @@ class GeneratedResponse:
     success: bool
     error_message: Optional[str] = None
     timestamp: float = 0.0
-    
+    logit_stats: Optional[Dict[str, Any]] = None  # Summary statistics (mean, min, entropy, etc.)
+    token_logprobs: Optional[List[Dict[str, Any]]] = None  # Full per-token top-k logprobs
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.time()
@@ -437,13 +439,15 @@ Verification: Yes, 2+2=4
                 if not thinking:
                     thinking = response[:200] + "..." if len(response) > 200 else response
                 if not final_answer:
-                    final_answer = "Unable to parse answer"
+                    # Keep entire response as final answer when no answer tag found
+                    final_answer = response.strip() if response.strip() else "Empty response"
             
             # Ensure we have both components
             if not thinking:
                 thinking = "Reasoning not found in expected format"
             if not final_answer:
-                final_answer = "Answer not found in expected format"
+                # Keep entire response as final answer
+                final_answer = response.strip() if response.strip() else "Empty response"
                 
         except Exception as e:
             logger.debug(f"   ⚠️ Error parsing response: {e}")
@@ -452,12 +456,12 @@ Verification: Yes, 2+2=4
         
         # Debug info for troubleshooting
         if not thinking or not final_answer or "not found" in thinking.lower() or "not found" in final_answer.lower():
-            logger.debug(f"   🔍 Debug - FULL RAW RESPONSE:")
-            logger.debug(f"{'='*80}")
-            print(response)
-            logger.debug(f"{'='*80}")
-            logger.debug(f"   🔍 Debug - Extracted thinking: {thinking[:50]}...")
-            logger.debug(f"   🔍 Debug - Extracted answer: {final_answer}")
+            # logger.debug(f"   🔍 Debug - FULL RAW RESPONSE:")
+            # logger.debug(f"{'='*80}")
+            # print(response)  # Commented out - slows down due to IO
+            # logger.debug(f"{'='*80}")
+            # logger.debug(f"   🔍 Debug - Extracted thinking: {thinking[:50]}...")
+            # logger.debug(f"   🔍 Debug - Extracted answer: {final_answer}")
             # Show where <answer> tag is if present
             answer_pos = response.find('<answer>')
             if answer_pos != -1:
@@ -636,7 +640,7 @@ Verification: Yes, 2+2=4
             List of GeneratedResponse
         """
         # Use client-specific batch size
-        if self.client_type == 'vllm':
+        if self.client_type in ['vllm', 'vllm_logits']:
             response_batch_size = self.batch_size
             logger.debug(f"🔄 Generating responses for {len(variations)} variations...")
             logger.debug(f"   Settings: batch_size={response_batch_size}, max_workers={self.max_workers}")
@@ -667,6 +671,7 @@ Verification: Yes, 2+2=4
             
             try:
                 # Send batch to RITS client (it uses max_workers internally)
+                logit_results = None  # Will be populated if using VLLMClientWithLogits
                 if hasattr(self.model_client, 'get_model_response'):
                     responses = self.model_client.get_model_response(
                         system_prompts=system_prompts,
@@ -674,6 +679,9 @@ Verification: Yes, 2+2=4
                         max_new_tokens=self.max_new_tokens,
                         temperature=self.temperature
                     )
+                    # Capture logprobs if using VLLMClientWithLogits
+                    if hasattr(self.model_client, '_last_logit_results') and self.model_client._last_logit_results:
+                        logit_results = self.model_client._last_logit_results
 
                 else:
                     # Fallback for other client types
@@ -687,16 +695,23 @@ Verification: Yes, 2+2=4
                             temperature=self.temperature
                         ))
                         responses.append(response)
-                
+
                 batch_time = time.time() - start_time
                 logger.debug(f"    📥 Batch {batch_num} completed in {batch_time:.2f}s")
-                
+
                 # Process responses for this batch
                 batch_responses = []
-                for variation, response in zip(batch, responses):
+                for idx, (variation, response) in enumerate(zip(batch, responses)):
                     try:
                         thinking, final_answer = self.parse_model_response(response)
-                        
+
+                        # Get logprobs for this response if available
+                        response_logit_stats = None
+                        response_token_logprobs = None
+                        if logit_results and idx < len(logit_results):
+                            response_logit_stats = logit_results[idx].get('logit_stats')
+                            response_token_logprobs = logit_results[idx].get('token_logprobs')
+
                         result_response = GeneratedResponse(
                             variation_id=variation.variation_id,
                             problem=variation.modified_problem,
@@ -704,9 +719,11 @@ Verification: Yes, 2+2=4
                             thinking=thinking,
                             final_answer=final_answer,
                             generation_time=batch_time / len(batch),  # Approximate per-item time
-                            success=True
+                            success=True,
+                            logit_stats=response_logit_stats,
+                            token_logprobs=response_token_logprobs
                         )
-                        
+
                     except Exception as e:
                         result_response = GeneratedResponse(
                             variation_id=variation.variation_id,
@@ -718,7 +735,7 @@ Verification: Yes, 2+2=4
                             success=False,
                             error_message=f"Parse error: {e}"
                         )
-                    
+
                     batch_responses.append(result_response)
                 
                 all_responses.extend(batch_responses)
@@ -1313,7 +1330,7 @@ def main():
     parser.add_argument('--problem', help='Problem text to generate variations for (for stream mode)')
     
     # Model configuration
-    parser.add_argument('--client-type', choices=['rits', 'vllm'], default='rits',
+    parser.add_argument('--client-type', choices=['rits', 'vllm', 'vllm_logits', 'ollama', 'ollama_logits'], default='rits',
                        help='Model client type (default: rits)')
     parser.add_argument('--model', default='microsoft/Phi-4-reasoning',
                        help='Model name for generation')

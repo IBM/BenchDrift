@@ -60,118 +60,74 @@ class LLMJudgeAnswerChecker:
             logger.debug(f"❌ Failed to initialize model client: {e}")
             raise
     
-    def create_judge_prompt(self, predicted_answer: str, ground_truth: str) -> str:
-        """Create prompt for LLM judge to compare answers"""
+    def create_judge_prompt(self, predicted_answer: str, ground_truth: str,
+                            few_shot_examples: str = "") -> str:
+        """Create prompt for LLM judge to compare answers.
 
-        prompt = f"""You are an expert answer evaluator. Compare the predicted answer with the ground truth answer and determine if they are semantically equivalent.
+        Args:
+            predicted_answer: The model's answer.
+            ground_truth: The expected correct answer.
+            few_shot_examples: Category-specific few-shot examples block.
+                If empty, uses a minimal default.
+        """
+        if not few_shot_examples:
+            few_shot_examples = (
+                "- \"42\" vs \"42.0\" → YES (same value)\n"
+                "- \"Monday\" vs \"Tuesday\" → NO (different days)\n"
+                "- \"Option A\" vs \"Option B\" → NO (different options)\n"
+                "- \"USA\" vs \"United States\" → YES (same country)"
+            )
+
+        prompt = f"""You are an expert answer evaluator. Determine if the predicted answer matches the ground truth.
 
 GROUND TRUTH: {ground_truth}
 
 PREDICTED ANSWER: {predicted_answer}
 
-Core Principle: Focus on SEMANTIC MEANING, not exact formatting or wording.
+Rules:
+1. Extract the core answer from the predicted text — ignore explanations, reasoning, and extra detail.
+2. Compare the core answer to the ground truth for SEMANTIC EQUIVALENCE.
+3. Ignore formatting differences: spacing, punctuation, capitalization, notation style.
+4. If the answer contains JSON like {{"answer": "X"}}, extract the "answer" field value only.
 
-Evaluation Rules:
-1. Extract the core answer/conclusion from each response, ignoring extra text or explanations
-2. Answers are EQUIVALENT if they convey the same meaning, value, or information
-3. Be flexible with format variations: different notations, representations, or phrasings of the same concept
-4. Consider domain-appropriate equivalences (numerical, temporal, spatial, categorical, etc.)
-5. Ignore minor formatting differences: spacing, punctuation, capitalization, leading zeros
-6. Look for the essential semantic content, not surface-level string matching
-
-STRUCTURED ANSWER HANDLING:
-• If answers contain JSON/dictionary structures like {{"answer": "value"}}, extract the relevant field value
-• For multi-field JSON (e.g., {{"explanation": "...", "answer": "X"}}), focus ONLY on the "answer" field
-• For ordered lists (e.g., {{"orderedlist": ["A", "B", "C"]}}), compare the list contents and order
-• Ignore "explanation", "reasoning", "steps" fields - only evaluate the final answer value
-• Strip formatting artifacts: quotes, braces, brackets around the core answer
-
-Equivalence Principles:
-• Same value in different formats: "42", "42.0", "forty-two", {{"answer": "42"}}
-• Same time in different notations: "6:55 AM", "06:55", "0655"
-• Same concept with different wording: "rectangle area", "rectangular surface area"
-• Same location with different specificity: "New York", "NYC", "New York City"
-• Same direction/orientation: "north", "northward", "to the north"
-• Same measurement in different units: "1 meter", "100 centimeters"
-
-Key Examples:
-- "15.5 hours" vs "15 and a half hours" → YES (same duration)
-- "turn left" vs "go left" vs "leftward" → YES (same direction)
-- "352 BC" vs {{"answer": "352 BC"}} → YES (same answer, different format)
-- {{"orderedlist": ["A", "B"]}} vs ["A", "B"] → YES (same list)
-- {{"explanation": "...", "answer": "42"}} vs "42" → YES (extract answer field)
-- "rectangle" vs "rectangular shape" → YES (same geometric concept)
-- "increase by 25%" vs "multiply by 1.25" → YES (same mathematical operation)
-- "14:30" vs "2:30 PM" → YES (same time in different formats)
-- "40 square cm" vs "40 cm²" vs "forty square centimeters" → YES (same area)
-- "USA" vs "United States" vs "America" → YES (same country)
-- "northeast" vs "NE" vs "to the northeast" → YES (same direction)
-- "Monday" vs "Tuesday" → NO (different days)
-- "north" vs "south" → NO (opposite directions)
+{few_shot_examples}
 
 Answer with ONLY "YES" or "NO" - nothing else."""
 
         return prompt
     
-    def batch_judge_answers(self, comparisons: List[Tuple[str, str]]) -> List[bool]:
-        """Judge a batch of answer comparisons"""
+    def batch_judge_answers(self, comparisons: List[Tuple[str, str]],
+                            dataset_name: str = "") -> List[bool]:
+        """Judge a batch of answer comparisons.
+
+        Args:
+            comparisons: List of (predicted_answer, ground_truth) tuples.
+            dataset_name: Optional HF dataset name for category-aware few-shots.
+        """
+        from benchdrift.eval.judge_few_shots import get_few_shot_examples
 
         # Prepare separate system and user prompts for batching
         system_prompts = []
         user_prompts = []
 
         for predicted, ground_truth in comparisons:
-            # Split the judge prompt into system and user components
-            system_prompt = """You are an expert answer evaluator. Compare the predicted answer with the ground truth answer and determine if they are semantically equivalent.
+            few_shots = get_few_shot_examples(ground_truth, dataset_name)
 
-Core Principle: Focus on SEMANTIC MEANING, not exact formatting or wording.
+            system_prompt = f"""You are an expert answer evaluator. Determine if the predicted answer matches the ground truth.
 
-Evaluation Rules:
-1. Extract the core answer/conclusion from each response, ignoring extra text or explanations
-2. Answers are EQUIVALENT if they convey the same meaning, value, or information
-3. Be flexible with format variations: different notations, representations, or phrasings of the same concept
-4. Consider domain-appropriate equivalences (numerical, temporal, spatial, categorical, etc.)
-5. Ignore minor formatting differences: spacing, punctuation, capitalization, leading zeros
-6. Look for the essential semantic content, not surface-level string matching
+Rules:
+1. Extract the core answer from the predicted text — ignore explanations, reasoning, and extra detail.
+2. Compare the core answer to the ground truth for SEMANTIC EQUIVALENCE.
+3. Ignore formatting differences: spacing, punctuation, capitalization, notation style.
+4. If the answer contains JSON like {{"answer": "X"}}, extract the "answer" field value only.
 
-STRUCTURED ANSWER HANDLING:
-• If answers contain JSON/dictionary structures like {"answer": "value"}, extract the relevant field value
-• For multi-field JSON (e.g., {"explanation": "...", "answer": "X"}), focus ONLY on the "answer" field
-• For ordered lists (e.g., {"orderedlist": ["A", "B", "C"]}), compare the list contents and order
-• Ignore "explanation", "reasoning", "steps" fields - only evaluate the final answer value
-• Strip formatting artifacts: quotes, braces, brackets around the core answer
-
-Equivalence Principles:
-• Same value in different formats: "42", "42.0", "forty-two", {"answer": "42"}
-• Same time in different notations: "6:55 AM", "06:55", "0655"
-• Same concept with different wording: "rectangle area", "rectangular surface area"
-• Same location with different specificity: "New York", "NYC", "New York City"
-• Same direction/orientation: "north", "northward", "to the north"
-• Same measurement in different units: "1 meter", "100 centimeters"
-
-Key Examples:
-- "15.5 hours" vs "15 and a half hours" → YES (same duration)
-- "turn left" vs "go left" vs "leftward" → YES (same direction)
-- "352 BC" vs {"answer": "352 BC"} → YES (same answer, different format)
-- {"orderedlist": ["A", "B"]} vs ["A", "B"] → YES (same list)
-- {"explanation": "...", "answer": "42"} vs "42" → YES (extract answer field)
-- "rectangle" vs "rectangular shape" → YES (same geometric concept)
-- "increase by 25%" vs "multiply by 1.25" → YES (same mathematical operation)
-- "14:30" vs "2:30 PM" → YES (same time in different formats)
-- "40 square cm" vs "40 cm²" vs "forty square centimeters" → YES (same area)
-- "USA" vs "United States" vs "America" → YES (same country)
-- "northeast" vs "NE" vs "to the northeast" → YES (same direction)
-- "Monday" vs "Tuesday" → NO (different days)
-- "north" vs "south" → NO (opposite directions)
+{few_shots}
 
 Answer with ONLY "YES" or "NO" - nothing else."""
 
             user_prompt = f"""GROUND TRUTH: {ground_truth}
 
 PREDICTED ANSWER: {predicted}
-
-🎯 TASK: Determine if the predicted answer is semantically equivalent to the ground truth answer.
-🔍 SUBSTITUTION CHECK: Read each variant in context to ensure it makes sense.
 
 Answer with ONLY "YES" or "NO" - nothing else."""
 
@@ -193,16 +149,22 @@ Answer with ONLY "YES" or "NO" - nothing else."""
             # Parse responses to boolean
             judgments = []
             for response in responses:
-                # Extract YES/NO from response
+                # Extract YES/NO — use first word to avoid substring matches
+                # (e.g., "YESTERDAY" contains "YES" but isn't an affirmative)
                 response_clean = response.strip().upper()
-                
-                if 'YES' in response_clean:
+                first_word = response_clean.split()[0] if response_clean.split() else ""
+
+                if first_word == 'YES' or response_clean == 'YES':
                     judgments.append(True)
-                elif 'NO' in response_clean:
+                elif first_word == 'NO' or response_clean == 'NO':
+                    judgments.append(False)
+                elif response_clean.startswith('YES'):
+                    judgments.append(True)
+                elif response_clean.startswith('NO'):
                     judgments.append(False)
                 else:
                     # Fallback: if unclear, mark as incorrect (conservative)
-                    logger.debug(f"⚠️ Unclear judge response: {response[:50]}... → Marking as NO")
+                    logger.debug(f"Unclear judge response: {response[:50]}... -> Marking as NO")
                     judgments.append(False)
             
             return judgments

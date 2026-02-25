@@ -1,246 +1,273 @@
-# Running the Semantic Pipeline
+# Running the BenchDrift Pipeline
 
-Complete guide for running the BenchDrift semantic clustering pipeline.
+Complete guide for running BenchDrift — variation generation, validation, response collection, and drift evaluation.
 
 ## Prerequisites
 
-Set your API keys:
+### Ollama (recommended for local models)
 ```bash
-# For RITS (required for response generation - target model)
+# Install from https://ollama.com
+ollama pull qwen3:8b       # Generator/judge model
+ollama pull mistral:7b     # Target model
+```
+
+### RITS (IBM cluster)
+```bash
 export RITS_API_KEY='your_rits_api_key_here'
-
-# For Gemini (optional - for variation/validation/evaluation only)
-export GEMINI_API_KEY='your_gemini_api_key_here'
 ```
 
-**Note:** Gemini can be used for variation generation, validation, and evaluation. Response generation (target model) always uses RITS.
-
----
-
-## Method 1: Jupyter Notebook (Interactive)
-
-**Best for:** Exploration and visualization
-
+### Groq (cloud API)
 ```bash
-jupyter notebook demo_semantic.ipynb
-```
-
-Run all cells for full pipeline execution with built-in visualizations.
-
----
-
-## Method 2: Shell Script (Quick Run)
-
-**Best for:** Simple end-to-end runs
-
-### Basic run:
-```bash
-./run_semantic_pipeline.sh
-```
-
-### Custom settings:
-```bash
-./run_semantic_pipeline.sh \
-  --input my_problems.json \
-  --output results.json \
-  --batch-size 100
-```
-
-### Enable long context:
-```bash
-./run_semantic_pipeline.sh \
-  --use-long-context \
-  --semantic-threshold 0.4
-```
-
-### Help:
-```bash
-./run_semantic_pipeline.sh --help
+export GROQ_API_KEY='your_groq_api_key_here'
 ```
 
 ---
 
-## Method 3: Python Script (Full Pipeline)
+## Model Specification Format
 
-**Best for:** Integration and automation
+All `--model-name`, `--response-model`, and `--judge-model` flags accept **client/model** format:
 
-```python
-from unified_batched_pipeline_semantic import UnifiedBatchedPipeline
+```bash
+--model-name ollama/qwen3:8b          # Ollama + qwen3:8b
+--response-model rits/granite-3-3-8b  # RITS + granite
+--judge-model groq/llama-3.3-70b      # Groq + llama
 
-config = {
-    'unified_file': 'output.json',
-    'input_problems': 'problems.json',
-    'batch_size': 50,
-    'client_type': 'rits',  # For variation/validation/evaluation
-    'model_name': 'phi-4',
-    'response_model': 'granite-3-3-8b',
-    'response_client_type': 'rits',  # Target model (always rits)
-    'use_llm_judge': True,
-    'judge_model': 'llama_3_3_70b',
-    'embedding_model': 'all-MiniLM-L6-v2',
-    'semantic_threshold': 0.35,
-    'use_generic': True,
-    'use_cluster_variations': True,
-}
+# Or use --client-type with bare model names (backward compatible):
+--client-type ollama --model-name qwen3:8b
+```
 
-pipeline = UnifiedBatchedPipeline(config)
-pipeline.stage1_generate_variations_batched()
-pipeline.stage_validation()
-pipeline.stage2_generate_responses()
-pipeline.stage3_add_evaluation_metrics()
+When using the `client/model` format, `--client-type` is optional — the client is inferred from the prefix. The generator model's client becomes the pipeline-wide default.
+
+---
+
+## Method 1: Single-Problem CLI (Quick Testing)
+
+```bash
+# Feature analysis only (instant, no LLM)
+python benchdrift_cli.py \
+  --problem "A store sells apples for \$2 each. John buys 3. How much?" \
+  --answer "6" \
+  --no-enrich --no-generate
+
+# Generate variations (Ollama required)
+python benchdrift_cli.py \
+  --problem "A store sells apples for \$2 each. John buys 3. How much?" \
+  --answer "6" \
+  --gen-model qwen3:8b \
+  --top-k 10
+
+# Full drift test (baseline + variations against target model)
+python benchdrift_cli.py \
+  --problem "A store sells apples for \$2 each. John buys 3. How much?" \
+  --answer "6" \
+  --gen-model qwen3:8b \
+  --target-model mistral:7b \
+  --top-k 10
+
+# JSON output
+python benchdrift_cli.py \
+  --problem "What is 15 + 25?" --answer "40" \
+  --gen-model qwen3:8b --target-model mistral:7b \
+  --top-k 5 --json --output results.json
+
+# Read from stdin
+echo "What is 15 + 25?" | python benchdrift_cli.py --answer "40" --gen-model qwen3:8b
 ```
 
 ---
 
-## Method 4: Command-Line (Direct Pipeline Script)
+## Method 2: Batch Pipeline (Full Experiments)
 
-**Best for:** Individual stage control and scripting
+### Unified Batched Pipeline (primary — `unified_batched_pipeline_semantic.py`)
 
-### Run all stages:
+Run as a Python module from the project root:
+
 ```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --input problems.json \
-  --all-stages \
-  --batch-size 50
+cd /path/to/BenchDrift-Pipeline-v2-AppRefactor
 ```
 
-### Run specific stage:
-
-**Stage 1 - Generate variations:**
+#### Stage 1: Generate Variations
 ```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --input problems.json \
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
+  --input data/gsm8k/test_500.jsonl \
   --stage variations \
   --batch-size 50 \
-  --use-generic \
-  --use-cluster-variations
+  --client-type ollama \
+  --model-name qwen3:8b \
+  --use-relevance-selection \
+  --relevance-top-k 10 \
+  --num-variations 3 \
+  --temperature 0.3 \
+  --max-tokens 1024 \
+  --save-every-batch
+
+# Or with client/model format (no --client-type needed):
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
+  --input data/gsm8k/test_500.jsonl \
+  --stage variations \
+  --batch-size 50 \
+  --model-name ollama/qwen3:8b \
+  --use-relevance-selection \
+  --relevance-top-k 10
 ```
 
-**Stage 2 - Validate variations:**
+#### Stage 2: Validate Variations
 ```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
   --stage validation \
-  --use-llm-judge \
-  --judge-model llama_3_3_70b
+  --client-type ollama \
+  --model-name qwen3:8b
+
+# Skip validation entirely:
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
+  --stage validation \
+  --validation-method none
+
+# Use council validation (multi-judge via OpenRouter):
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
+  --stage validation \
+  --validation-method council \
+  --council-models "openai/gpt-4o-mini,anthropic/claude-3-haiku,google/gemini-flash-1.5" \
+  --openrouter-api-key "$OPENROUTER_API_KEY"
 ```
 
-**Stage 3 - Generate responses:**
+#### Stage 3: Collect Target Model Responses
 ```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
   --stage responses \
-  --response-model granite-3-3-8b \
-  --batch-size 30
+  --client-type ollama \
+  --response-model mistral:7b
+
+# Or mixed backends:
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
+  --stage responses \
+  --response-model rits/granite-3-3-8b
 ```
 
-**Stage 4 - Evaluate:**
+#### Stage 4: Evaluate
 ```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
+# String matching (default, fast):
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
+  --stage evaluation \
+  --client-type ollama \
+  --model-name qwen3:8b
+
+# LLM judge (more accurate for ambiguous answers):
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
   --stage evaluation \
   --use-llm-judge \
-  --judge-model llama_3_3_70b
+  --judge-model ollama/qwen3:8b
 ```
 
-**Export CSV:**
+#### All Stages at Once
 ```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --stage export-csv
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/gsm8k_results.json \
+  --input data/gsm8k/test_500.jsonl \
+  --all-stages \
+  --batch-size 50 \
+  --model-name ollama/qwen3:8b \
+  --response-model ollama/mistral:7b \
+  --use-relevance-selection \
+  --relevance-top-k 10
+
+# Quick test with 10 problems:
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
+  --unified-file experiments/test_10.json \
+  --input data/gsm8k/test_500.jsonl \
+  --all-stages \
+  --batch-size 10 \
+  --max-problems 10 \
+  --model-name ollama/qwen3:8b \
+  --response-model ollama/mistral:7b
 ```
 
-### Advanced stage control:
+### Complete Variation Pipeline (simpler, progressive)
 
-**Run stages 1-4 (skip candidate detection):**
 ```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --input problems.json \
-  --stages-1-4 \
-  --batch-size 100
-```
-
-**Resume from specific stage:**
-```bash
-# Stage 1-2 already complete, continue from stage 3
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --stage responses \
-  --response-model granite-3-3-8b
-
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --stage evaluation \
-  --use-llm-judge
+python -m benchdrift.pipeline.complete_variation_pipeline \
+  --unified-file experiments/gsm8k_progressive.json \
+  --input data/gsm8k/test_500.jsonl \
+  --all-stages \
+  --client-type ollama \
+  --model-name qwen3:8b \
+  --eval-model mistral:7b \
+  --batch-size 50 \
+  --num-variations 3
 ```
 
 ---
 
-## Configuration Options
+## Method 3: Interactive App (Gradio)
 
-### Core Settings
 ```bash
---unified-file FILE          # Output JSON file (required)
---input FILE                 # Input problems file (required for variations stage)
---batch-size N               # Processing batch size (default: 50)
---max-workers N              # Parallel workers (default: 4)
---max-problems N             # Limit number of problems to process
+python app.py              # Local at http://localhost:7860
+python app.py --share      # Public URL
+python app.py --port 7861  # Custom port
 ```
 
-### Debug Levels
+---
 
-**Three levels of output:**
-
-1. **Default (Clean)** - High-level progress only:
-   ```bash
-   python unified_batched_pipeline_semantic.py --all-stages --input problems.json
-   ```
-   Output:
-   ```
-   🔄 Stage 1: Generating Variations...
-   Processing batches: 100%|████████| 10/10 [02:30<00:00]
-   ✅ Stage 1 complete: Generated 500 entries
-   ```
-
-2. **Verbose (Detailed)** - All debug information:
-   ```python
-   # In Python config
-   config = {'verbose': True, ...}
-   ```
-   Output:
-   ```
-   🔄 Stage 1: Generating Variations...
-   📦 Processing batch 1/10 (50 problems)
-      🔍 DEBUG: Candidate Embeddings
-      [0] 'morning' @ (10, 17)
-      ...
-   ```
-
-3. **Log File (Complete)** - Everything saved automatically:
-   ```
-   pipeline_debug.log  # Created automatically, contains all debug output
-   ```
-
-**Quick start:**
-- Default: Just run the pipeline (clean output)
-- Debug: Add `'verbose': True` to config (full debug output)
-- Logs: Check `pipeline_debug.log` if something goes wrong
+## Configuration Reference
 
 ### Model Settings
 ```bash
---client-type TYPE           # API client for variation/validation/evaluation: rits, vllm, gemini (default: rits)
---model-name MODEL           # Variation generation model (default: mistral_small_3_2_instruct)
---response-model MODEL       # Response generation model - always uses RITS (default: mistral_small_3_2_instruct)
---judge-model MODEL          # LLM judge model (can use gemini if client-type=gemini)
+--client-type TYPE           # rits, ollama, ollama_logits, vllm, vllm_logits, groq, openai
+--model-name MODEL           # Generator model (accepts client/model format)
+--response-model MODEL       # Target model for responses (accepts client/model format)
+--judge-model MODEL          # Judge model for evaluation (accepts client/model format)
 --max-model-len N            # Max context length for VLLM (default: 8192)
 --max-tokens N               # Max output tokens (default: 1024)
 --temperature N              # Temperature for generation (default: 0.1)
+--max-workers N              # Parallel workers (default: 4)
 ```
 
-**Note:** `--client-type` applies to variation/validation/evaluation stages only. Response generation always uses RITS to ensure the target model is not affected.
+### Batching
+```bash
+--batch-size N               # Processing batch size (default: 50)
+--max-problems N             # Limit number of problems
+--save-every-batch           # Save after every batch (default: True)
+```
+
+### Variation Control
+```bash
+--use-axes AXES              # Comma-separated taxonomy axes to enable
+                             # Valid: linguistic,referential,pragmatic,structural,
+                             #        persona,long_context,constraint_targeted,all
+                             # Subtract with minus: "all,-persona"
+                             # Default: linguistic,referential,pragmatic,structural,constraint_targeted
+--num-variations N           # Number of variations per problem (default: 3)
+--use-relevance-selection    # Rank transformations by relevance per problem
+--relevance-top-k N          # Top-k ranked transformations to generate (default: 10)
+--use-cluster-variations     # Cluster-based variations (default: True)
+--no-cluster-variations      # Disable cluster variations
+```
+
+### Validation
+```bash
+--validation-method METHOD   # single (default), council, or none
+--rectify-invalid            # Rectify invalid variations instead of dropping
+--use-council                # DEPRECATED: use --validation-method council
+--council-models MODELS      # OpenRouter model IDs for council judges
+--chairman-model MODEL       # OpenRouter model for council chairman
+--openrouter-api-key KEY     # OpenRouter API key
+```
+
+### Evaluation
+```bash
+--use-llm-judge              # Use LLM judge (default: string matching)
+--disable-cot                # Disable chain-of-thought for faster responses
+--force-regenerate           # Force regenerate responses
+```
 
 ### Semantic Clustering
 ```bash
@@ -248,190 +275,39 @@ python unified_batched_pipeline_semantic.py \
 --semantic-threshold N       # Clustering threshold (default: 0.35)
 ```
 
-### Variation Types
+### Logging
 ```bash
---use-generic                # Generic transformations (default: True)
---no-generic                 # Disable generic transformations
---use-cluster-variations     # Cluster-based variations (default: True)
---no-cluster-variations      # Disable cluster variations
---use-persona                # Persona variations (default: False)
---use-long-context           # Long context variations for >500 char prompts (default: False)
+--verbose / -v               # Enable verbose/debug output
 ```
-
-### Evaluation
-```bash
---use-llm-judge              # Use LLM judge for evaluation
---rectify-invalid            # Rectify invalid variations instead of dropping
---force-regenerate           # Force regenerate responses
---disable-cot                # Disable chain-of-thought reasoning
-```
-
----
-
-## Example Workflows
-
-### Quick test:
-```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file test_output.json \
-  --input demo_problems.json \
-  --all-stages \
-  --batch-size 10 \
-  --use-generic \
-  --use-cluster-variations
-```
-
-### Production run with all variation types:
-```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file production.json \
-  --input problems.json \
-  --all-stages \
-  --batch-size 100 \
-  --max-workers 8 \
-  --use-generic \
-  --use-cluster-variations \
-  --use-persona \
-  --use-long-context \
-  --use-llm-judge \
-  --judge-model llama_3_3_70b
-```
-
-### Custom semantic threshold:
-```bash
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --input problems.json \
-  --stage variations \
-  --semantic-threshold 0.4 \
-  --embedding-model all-mpnet-base-v2
-```
-
-### Using Gemini for variation/validation/evaluation:
-```bash
-# Gemini for variation generation and evaluation, RITS for target model responses
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --input problems.json \
-  --all-stages \
-  --client-type gemini \
-  --model-name gemini-2.0-flash-exp \
-  --judge-model gemini-2.0-flash-exp \
-  --response-model granite-3-3-8b \
-  --use-llm-judge
-```
-
-### Debug single stage:
-```bash
-# Run only validation stage
-python unified_batched_pipeline_semantic.py \
-  --unified-file output.json \
-  --stage validation \
-  --rectify-invalid
-```
-
----
-
-## Visualization
-
-After running the pipeline:
-```python
-from comprehensive_results_visualizer import visualize_results
-import pandas as pd
-import json
-
-with open('output.json', 'r') as f:
-    data = json.load(f)
-
-df = pd.DataFrame(data)
-viz = visualize_results(df)
-```
-
-Creates 4-panel visualization with drift analysis.
-
----
-
-## Calibrating Thresholds
-
-Find optimal clustering threshold for your data:
-```bash
-python calibrate_semantic_thresholds.py \
-  --input problems.json \
-  --output calibration.json
-```
+All logs are saved to `logs/pipeline_debug.log`.
 
 ---
 
 ## Input Format
 
-Problems in JSON format:
+### JSONL (recommended for large datasets)
+```json
+{"question": "What is 15 + 25?", "answer": "40"}
+{"question": "Solve: 3x + 5 = 20", "answer": "5"}
+```
+Both `question` and `problem` keys are accepted.
+
+### JSON array
 ```json
 [
-  {
-    "problem": "Question text...",
-    "answer": "Expected answer"
-  }
+  {"problem": "What is 15 + 25?", "answer": "40"},
+  {"problem": "Solve: 3x + 5 = 20", "answer": "5"}
 ]
-```
-
-
-## Output Format
-
-```json
-{
-  "config": {
-    "target_model": "phi-4",
-    "composite_method": "semantic",
-    "use_generic_variations": true,
-    ...
-  },
-  "stats": {
-    "total_problems": 10,
-    "total_segments": 45,
-    "total_dependencies": 23,
-    "total_variations_generated": 100,
-    "total_variations_verified": 87,
-    "total_llm_calls": 65,
-    "timing": {
-      "stage1": 12.5,
-      "stage2": 45.2,
-      "stage3": 23.1,
-      ...
-    }
-  },
-  "data": [
-    {
-      "problem_idx": 0,
-      "original_problem": "What is 15 + 25?",
-      "expected_answer": "40",
-      "candidates": [...],
-      "segments": [...],
-      "linked_groups": [...],
-      "dependency_graph": {...},
-      "variations": [
-        {
-          "type": "counterfactual",
-          "variation": "If you had 15 apples and received 25 more...",
-          "target_response": "40",
-          "answer_preserved": true,
-          "judge_verdict": "yes"
-        },
-        ...
-      ]
-    },
-    ...
-  ]
-}
 ```
 
 ---
 
 ## Stage Dependencies
 
-1. **Variations** - Generates variations from input problems
-2. **Validation** - Validates all variations (depends on: variations)
-3. **Responses** - Generates model responses (depends on: validation)
-4. **Evaluation** - Evaluates drift (depends on: responses)
-5. **Export CSV** - Exports results (depends on: evaluation)
+1. **Variations** — generates variations from input (requires `--input`)
+2. **Validation** — validates variations (depends on: variations)
+3. **Responses** — collects target model responses (depends on: validation or variations)
+4. **Evaluation** — computes drift metrics (depends on: responses)
+5. **Export CSV** — exports to CSV (depends on: evaluation)
 
-Run stages in order or use `--all-stages` to run all sequentially.
+Run stages in order, or use `--all-stages` to run all sequentially.

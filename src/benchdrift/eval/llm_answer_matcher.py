@@ -45,8 +45,17 @@ class StringBasedMatcher:
             if answer.endswith(suffix):
                 answer = answer[:-len(suffix)].strip()
 
-        # Extract numbers if present
-        numbers = re.findall(r'-?\d+\.?\d*', answer)
+        # Try to extract a number, handling fractions, commas, and percentages
+        # Check for fractions first (e.g., "3/4", "-1/2")
+        fraction_match = re.search(r'-?\d+\s*/\s*\d+', answer)
+        if fraction_match:
+            return re.sub(r'\s', '', fraction_match.group())
+
+        # Remove commas from numbers (e.g., "1,000" -> "1000")
+        answer_no_commas = re.sub(r'(\d),(\d)', r'\1\2', answer)
+
+        # Extract numbers (including decimals and negatives)
+        numbers = re.findall(r'-?\d+\.?\d*', answer_no_commas)
         if numbers:
             return numbers[0]
 
@@ -58,8 +67,24 @@ class StringBasedMatcher:
         gt_norm = StringBasedMatcher.normalize_answer(ground_truth)
         ma_norm = StringBasedMatcher.normalize_answer(model_answer)
 
-        # Exact match
-        exact_match = gt_norm == ma_norm
+        # Numeric-aware comparison: "42.0" == "42", "3/4" == "0.75"
+        try:
+            if '/' in gt_norm and '/' not in ma_norm:
+                num, den = gt_norm.split('/')
+                gt_val = float(num) / float(den)
+                ma_val = float(ma_norm)
+                exact_match = abs(gt_val - ma_val) < 1e-6
+            elif '/' in ma_norm and '/' not in gt_norm:
+                num, den = ma_norm.split('/')
+                ma_val = float(num) / float(den)
+                gt_val = float(gt_norm)
+                exact_match = abs(gt_val - ma_val) < 1e-6
+            else:
+                gt_val = float(gt_norm)
+                ma_val = float(ma_norm)
+                exact_match = abs(gt_val - ma_val) < 1e-6
+        except (ValueError, ZeroDivisionError):
+            exact_match = gt_norm == ma_norm
 
         # Partial match (one contains the other)
         partial_match = gt_norm in ma_norm or ma_norm in gt_norm

@@ -1,0 +1,322 @@
+{
+  "_meta": {
+    "version": 1,
+    "last_updated": "auto"
+  },
+  "domains": {
+    "arithmetic": {
+      "synonyms": [
+        "arithmetic",
+        "basic math",
+        "addition",
+        "subtraction",
+        "multiplication",
+        "division",
+        "word problems",
+        "elementary math"
+      ],
+      "examples": [
+        {
+          "original": "If John has 5 apples and gives 2 away, how many does he have?",
+          "variation": "Suppose John starts with five apples. After giving two to a friend, what is his remaining count?"
+        },
+        {
+          "original": "A store sells 3 items at $4 each. What is the total cost?",
+          "variation": "Three products are each priced at four dollars. Calculate the aggregate cost of purchasing all three."
+        },
+        {
+          "original": "A baker made 48 cookies and packed them into bags of 6. How many bags did she fill?",
+          "variation": "Forty-eight cookies were distributed equally into bags holding six apiece. Determine the number of bags used."
+        }
+      ]
+    },
+    "algebra": {
+      "synonyms": [
+        "algebra",
+        "equations",
+        "variables",
+        "expressions",
+        "linear equations",
+        "quadratic",
+        "polynomials"
+      ],
+      "examples": [
+        {
+          "original": "Solve for x: 2x + 3 = 11",
+          "variation": "Determine the value of x that satisfies the equation 2x + 3 = 11."
+        },
+        {
+          "original": "If y = 3x - 1, what is y when x = 4?",
+          "variation": "Given the relationship y = 3x - 1, compute y for x = 4."
+        }
+      ]
+    },
+    "geometry": {
+      "synonyms": [
+        "geometry",
+        "area",
+        "perimeter",
+        "angles",
+        "shapes",
+        "triangles",
+        "circles",
+        "polygons",
+        "volume",
+        "surface area"
+      ],
+      "examples": [
+        {
+          "original": "Find the area of a triangle with base 6 and height 4.",
+          "variation": "A triangle has a 6-unit base and stands 4 units tall. What area does it enclose?"
+        },
+        {
+          "original": "What is the circumference of a circle with radius 7?",
+          "variation": "A circle whose radius measures 7 units — determine the total distance around its boundary."
+        }
+      ]
+    },
+    "probability": {
+      "synonyms": [
+        "probability",
+        "chance",
+        "likelihood",
+        "stochastic",
+        "combinatorics",
+        "counting",
+        "permutations",
+        "combinations",
+        "random"
+      ],
+      "examples": [
+        {
+          "original": "What is the probability of rolling a 6 on a fair die?",
+          "variation": "When tossing a standard six-sided die, what are the chances of landing on six?"
+        },
+        {
+          "original": "How many ways can you choose 3 items from a set of 10?",
+          "variation": "From a collection of ten distinct objects, in how many ways can a subset of three be selected?"
+        }
+      ]
+    },
+    "logic": {
+      "synonyms": [
+        "logic",
+        "deduction",
+        "premises",
+        "conclusions",
+        "reasoning",
+        "syllogism",
+        "propositional",
+        "boolean"
+      ],
+      "examples": [
+        {
+          "original": "If all cats are animals and some animals are pets, can we conclude all cats are pets?",
+          "variation": "Given that every cat belongs to the animal kingdom and a subset of animals are classified as pets, does it follow that every cat qualifies as a pet?"
+        },
+        {
+          "original": "If it rains, the ground gets wet. The ground is wet. Did it rain?",
+          "variation": "Rain causes wet ground. Observing that the ground is wet, can we definitively conclude that precipitation occurred?"
+        }
+      ]
+    },
+    "statistics": {
+      "synonyms": [
+        "statistics",
+        "mean",
+        "median",
+        "mode",
+        "average",
+        "standard deviation",
+        "data analysis",
+        "variance",
+        "distribution"
+      ],
+      "examples": [
+        {
+          "original": "Find the mean of the numbers 4, 8, 15, 16, 23.",
+          "variation": "Given the dataset {4, 8, 15, 16, 23}, compute the arithmetic average."
+        },
+        {
+          "original": "What is the median of 3, 7, 9, 12, 15?",
+          "variation": "Arrange the values 3, 7, 9, 12, 15 and identify the middle value."
+        }
+      ]
+    },
+    "number_theory": {
+      "synonyms": [
+        "number theory",
+        "primes",
+        "divisibility",
+        "modular arithmetic",
+        "factors",
+        "multiples",
+        "gcd",
+        "lcm",
+        "integers"
+      ],
+      "examples": [
+        {
+          "original": "Is 37 a prime number?",
+          "variation": "Determine whether thirty-seven has any divisors other than 1 and itself."
+        },
+        {
+          "original": "What is the greatest common divisor of 24 and 36?",
+          "variation": "Find the largest positive integer that evenly divides both 24 and 36."
+        }
+      ]
+    },
+    "calculus": {
+      "synonyms": [
+        "calculus",
+        "derivatives",
+        "integrals",
+        "limits",
+        "differentiation",
+        "integration",
+        "rates of change",
+        "optimization"
+      ],
+      "examples": [
+        {
+          "original": "Find the derivative of f(x) = 3x^2 + 2x.",
+          "variation": "Compute the rate of change of the function f(x) = 3x squared plus 2x with respect to x."
+        },
+        {
+          "original": "What is the limit of (x^2 - 1)/(x - 1) as x approaches 1?",
+          "variation": "Evaluate the limiting value of the expression (x squared minus one) divided by (x minus one) when x tends toward 1."
+        }
+      ]
+    },
+    "measurement": {
+      "synonyms": [
+        "measurement",
+        "units",
+        "conversion",
+        "comparison",
+        "distance",
+        "weight",
+        "temperature",
+        "time",
+        "speed",
+        "rate"
+      ],
+      "examples": [
+        {
+          "original": "Convert 5 kilometers to meters.",
+          "variation": "Express a distance of 5 km in terms of meters."
+        },
+        {
+          "original": "If a car travels at 60 mph for 2.5 hours, how far does it go?",
+          "variation": "A vehicle maintains a constant speed of sixty miles per hour over a period of two and a half hours. What total distance is covered?"
+        }
+      ]
+    },
+    "general_knowledge": {
+      "synonyms": [
+        "general knowledge",
+        "trivia",
+        "factual",
+        "definitions",
+        "science",
+        "history",
+        "geography",
+        "common sense"
+      ],
+      "examples": [
+        {
+          "original": "What is the capital of France?",
+          "variation": "Which city serves as France's governmental seat?"
+        },
+        {
+          "original": "How many days are in a leap year?",
+          "variation": "In a year with an extra calendar day, what is the total number of days?"
+        }
+      ]
+    },
+    "analyze_the_problem___": {
+      "synonyms": [
+        "analyze the problem:**",
+        "analyze_the_problem___"
+      ],
+      "examples": [
+        {
+          "original": "A company has 120 employees. If 30% of the employees work in the sales department, 25% in engineering, and the rest in other departments, how many employees work in departments other than sales and engineering?",
+          "variation": "At a firm with 120 staff members, the sales team comprises 30% of the workforce, while engineering accounts for 25%. What is the number of employees who are not part of either the sales or engineering teams?"
+        },
+        {
+          "original": "A rectangular garden has a perimeter of 60 meters. If the length is 5 meters longer than the width, what are the dimensions of the garden?",
+          "variation": "A rectangle-shaped yard measures 60 meters around its boundary. Given that the longer side exceeds the shorter side by 5 meters, determine the length and width of this rectangular area."
+        },
+        {
+          "original": "A train travels from City A to City B at 60 mph and returns at 40 mph. If the total journey takes 5 hours, how far apart are the two cities?",
+          "variation": "A locomotive makes a round trip between two urban centers, moving at 60 mph on the outbound journey and 40 mph on the return. Given that the complete round trip consumes 5 hours, calculate the distance separating these two cities."
+        },
+        {
+          "original": "In a class of 40 students, 25 play basketball, 20 play soccer, and 10 play both sports. How many students play neither basketball nor soccer?",
+          "variation": "Out of 40 pupils in a classroom, 25 participate in basketball activities, 20 engage in soccer, with 10 involved in both sports. Determine the count of students who do not participate in either basketball or soccer."
+        },
+        {
+          "original": "A store sells a product for $120 after a 20% discount. What was the original price of the product?",
+          "variation": "A retailer offers a 20% price reduction on an item, resulting in a final selling price of $120. Calculate the pre-discount cost of this merchandise."
+        }
+      ]
+    },
+    "genetics": {
+      "synonyms": [
+        "genetics",
+        "genetics"
+      ],
+      "examples": [
+        {
+          "original": "In a particular species of plant, tall stems (T) are dominant over short stems (t). If a heterozygous tall plant is crossed with a short plant, what is the probability that the offspring will be short?",
+          "variation": "Consider a plant species where the allele for tall height (T) exhibits complete dominance over the allele for short height (t). Determine the expected proportion of progeny that will display the short phenotype when a Tt individual is mated with a tt individual."
+        },
+        {
+          "original": "A woman with blood type O has a child with blood type O. She claims that a man with blood type AB is the father. Based on genetics, is it possible for this man to be the father?",
+          "variation": "Given that a child has blood type O and the mother is blood type O, can a man possessing blood type AB be the biological father of this child? Explain your reasoning using principles of blood type inheritance."
+        },
+        {
+          "original": "In fruit flies, the gene for red eyes (R) is dominant and the gene for white eyes (r) is recessive. If two heterozygous red-eyed flies are crossed, what percentage of the offspring are expected to have white eyes?",
+          "variation": "Two fruit flies, both carrying the genotype Rr for eye color, are allowed to mate. Assuming the red eye allele (R) is dominant to the white eye allele (r), calculate the percentage of the resulting population that will exhibit the white-eyed phenotype."
+        },
+        {
+          "original": "In a certain animal, the allele for black fur (B) is dominant to the allele for brown fur (b), and the allele for short fur (S) is dominant to the allele for long fur (s). If two animals heterozygous for both traits (BbSs) are crossed, what is the probability that an offspring will have black fur and long fur?",
+          "variation": "Consider a dihybrid cross between two organisms that are both heterozygous for fur color and fur length, where Black (B) dominates brown (b) and Short (S) dominates long (s). What is the likelihood that a specific offspring will inherit the phenotype for black fur combined with long fur?"
+        },
+        {
+          "original": "A geneticist performs a test cross on a plant with an unknown genotype for flower color, where purple (P) is dominant to white (p). The unknown plant is crossed with a homozygous recessive white plant. If all of the offspring have purple flowers, what was the genotype of the unknown parent?",
+          "variation": "To determine the genotype of a purple-flowered plant (where P is dominant and p is recessive), a researcher crosses it with a white-flowered plant (pp). Assuming the resulting progeny are all purple-flowered, deduce the genetic makeup of the purple-flowered parent."
+        }
+      ]
+    },
+    "biology": {
+      "synonyms": [
+        "biology",
+        "biology"
+      ],
+      "examples": [
+        {
+          "original": "If a plant cell with a solute potential of -0.5 MPa and a pressure potential of 0.3 MPa is placed in a beaker of pure water, what is its total water potential?",
+          "variation": "Calculate the water potential of a plant cell given that the osmotic potential is -0.5 MPa and the turgor pressure is 0.3 MPa."
+        },
+        {
+          "original": "During the process of cellular respiration, a glucose molecule undergoes glycolysis, the Krebs cycle, and the electron transport chain. What is the maximum net yield of ATP molecules produced from one molecule of glucose in eukaryotic cells?",
+          "variation": "How many ATP molecules are typically generated in eukaryotes from the complete aerobic breakdown of a single glucose molecule?"
+        },
+        {
+          "original": "A man with type AB blood marries a woman with type O blood. What is the probability that their child will have type A blood?",
+          "variation": "If one parent is heterozygous for the IA and IB alleles (blood type AB) and the other parent is homozygous recessive (ii, blood type O), what are the odds of an offspring possessing blood type A?"
+        },
+        {
+          "original": "In a population of wildflowers, 84% of the plants have the dominant phenotype for red flowers, while 16% are white (recessive). Assuming the population is in Hardy-Weinberg equilibrium, what is the frequency of the recessive allele?",
+          "variation": "Given that 16% of a flower population displays the recessive white coloration and the population follows Hardy-Weinberg principles, determine the allele frequency for the recessive version of the gene."
+        },
+        {
+          "original": "Which specific enzyme is responsible for unwinding the DNA double helix during the process of replication by breaking the hydrogen bonds between base pairs?",
+          "variation": "Identify the protein that acts as a helicase during DNA synthesis to separate the two strands of the double helix."
+        }
+      ]
+    }
+  }
+}

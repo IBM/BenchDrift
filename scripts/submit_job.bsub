@@ -1,0 +1,41 @@
+#!/bin/bash
+#BSUB -G grp_data
+#BSUB -M 1200G
+#BSUB -W 12:30
+#BSUB -o logs/benchdrift_v2_%J.out
+#BSUB -e logs/benchdrift_v2_%J.err
+#BSUB -n 2
+#BSUB -gpu "num=6/task:mode=exclusive_process"
+#BSUB -R "rusage[mem=1200G,cpu=64]"
+#BSUB -J benchdrift_v2
+
+# Print job info
+echo "========================================"
+echo "Job ID: $LSB_JOBID"
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo "========================================"
+
+# LSF sets CUDA_VISIBLE_DEVICES automatically with #BSUB -gpu
+echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+nvidia-smi -L
+
+# Conda setup
+source /proj/data-eng/users/shailja/miniconda3/etc/profile.d/conda.sh
+conda activate execsynth
+
+# Go to project directory
+cd /proj/data-eng/users/shailja/benchdrift_council/BenchDrift-Pipeline-v2-RelevanceSelection
+
+# Install package (in case of updates)
+pip install -e .
+
+# Create logs and experiments directories
+mkdir -p logs experiments
+
+echo "========================================"
+echo "Starting BenchDrift v2 experiments..."
+echo "========================================"
+
+# Run the experiment script
+./scripts/run_all_experiments_optimized.sh

@@ -181,6 +181,11 @@ class Fragment:
 
     _id_counter = 0
 
+    @classmethod
+    def reset_counter(cls):
+        """Reset the ID counter (call between problems to keep IDs manageable)."""
+        cls._id_counter = 0
+
     def __init__(self, text: str, span: Tuple[int, int], fragment_type: str):
         self.id = Fragment._id_counter
         Fragment._id_counter += 1
@@ -329,6 +334,7 @@ def detect_fragments_comprehensive(problem: str) -> List[Fragment]:
 
     Returns non-overlapping fragments sorted by position.
     """
+    Fragment.reset_counter()  # Reset IDs for each new problem
     all_fragments = []
     covered_spans = []
 
@@ -451,8 +457,12 @@ def clean_model_response(text: str) -> str:
     text = re.sub(r'_(.*?)_', r'\1', text)        # Remove _underline_
     text = re.sub(r'`(.*?)`', r'\1', text)        # Remove `code`
     
-    # Remove ALL remaining formatting symbols
-    text = re.sub(r'[*_`#\[\]{}]', '', text)      # Remove stray formatting characters
+    # Remove stray formatting symbols, but preserve LaTeX math notation
+    # Preserve: \frac{}{}, x_{1}, \sqrt{}, etc.
+    # Only remove formatting chars that are NOT part of LaTeX commands
+    text = re.sub(r'(?<!\\)[*`#]', '', text)       # Remove * ` # (not preceded by \)
+    text = re.sub(r'(?<!\\)\[(?!\w)', '', text)     # Remove [ not part of LaTeX
+    text = re.sub(r'(?<!\w)\]', '', text)           # Remove ] not part of LaTeX
     text = re.sub(r'---+', '', text)              # Remove horizontal rules
     
     # Remove numbered list prefixes 
@@ -527,16 +537,16 @@ def is_valid_question(text: str) -> bool:
     Returns:
         True if text appears to be a valid question
     """
-    if not text or len(text.strip()) < 20:  # Increase minimum length
+    if not text or len(text.strip()) < 10:  # Allow short math problems
         return False
-    
+
     text = text.strip()
     text_lower = text.lower()
-    
+
     # REJECT: Pure meta-content that models often generate
     meta_content_patterns = [
         r'^.{0,5}(variation|example|output|format|near|far|transfer)',  # Starts with these words
-        r'^\d+\s*(total|variations?)',                                  # "5 total", "3 variations"  
+        r'^\d+\s*(total|variations?)',                                  # "5 total", "3 variations"
         r'^---+$',                                                      # Just dashes
         r'^\*\*.*\*\*$',                                               # Just bold text
         r'^(here is|here\'s|the answer is)',                          # Common prefixes
@@ -547,34 +557,27 @@ def is_valid_question(text: str) -> bool:
         r'^\s*-+\s*$',                                                # Just dashes
         r'^.*total\)?\s*$',                                           # Ends with "total" or "total)"
     ]
-    
+
     for pattern in meta_content_patterns:
         if re.match(pattern, text_lower):
             return False
-    
+
     # REJECT: If text is mostly formatting/structure
     if text.count('**') > 4:  # Too much bold formatting
         return False
-    
-    if len(text.replace('*', '').replace('-', '').replace('(', '').replace(')', '').strip()) < 15:
+
+    stripped = text.replace('*', '').replace('-', '').replace('(', '').replace(')', '').strip()
+    if len(stripped) < 10:
         return False  # After removing formatting, too short
-    
-    # REQUIRE: Must contain actual question/problem content
-    question_indicators = [
-        'calculate', 'find', 'determine', 'what', 'how', 'if', 'takes', 'requires',
-        'minutes', 'hours', 'seconds', 'time', 'will', 'would', 'should', 'is', 'are',
-        'paint', 'walk', 'reach', 'complete', 'number', 'area', 'average', 'same pace'
-    ]
-    
-    if not any(indicator in text_lower for indicator in question_indicators):
-        return False
-    
-    # REQUIRE: Should be a complete sentence (has basic sentence structure)
-    # Must have some kind of action/verb and reasonable sentence length
+
+    # Short math problems (< 5 words) are valid if they contain numbers/operators
     words = text_lower.split()
-    if len(words) < 10:  # Too short to be a proper problem statement
-        return False
-    
+    if len(words) < 5:
+        # Accept if it looks like a math expression or short question
+        has_math = bool(re.search(r'\d', text)) or any(op in text for op in ['+', '-', '*', '/', '='])
+        has_question = text.endswith('?') or any(w in text_lower for w in ['what', 'how', 'find', 'calculate'])
+        return has_math or has_question
+
     return True
 
 
@@ -1001,7 +1004,7 @@ def create_model_client_for_variations(client_type: str = None, model_name: str 
 
     try:
         # Import model clients locally to ensure they are available
-        from benchdrift.models.model_client import VLLMClient, ModelClientFactory, RITSClient
+        from benchdrift.models.model_client import VLLMClient, ModelClientFactory, RITSClient, OllamaClient
         from benchdrift.models.model_config_manager import ModelConfigManager
 
         # Initialize model config manager
@@ -1023,6 +1026,11 @@ def create_model_client_for_variations(client_type: str = None, model_name: str 
             max_workers = client_settings.get('max_workers', 5)
             max_new_tokens = client_settings.get('max_new_tokens', 1000)
             return RITSClient(recommended_model, max_workers=max_workers, max_new_tokens=max_new_tokens)
+        elif recommended_client in ('ollama', 'ollama_logits'):
+            max_workers = client_settings.get('max_workers', 4)
+            max_new_tokens = client_settings.get('max_new_tokens', 1000)
+            return ModelClientFactory.create_client(recommended_client, recommended_model,
+                                                    max_workers=max_workers, max_new_tokens=max_new_tokens)
         elif recommended_client == 'vllm':
             try:
                 return ModelClientFactory.create_client('vllm', recommended_model, max_model_len=max_model_len)
@@ -4243,9 +4251,9 @@ OUTPUT: Each variation on a separate line. NO headers, NO numbers, NO formatting
         # Define generic variation types
         generic_types = [
             {
-                'type': 'counterfactual',
-                'description': 'Create a hypothetical scenario that explores what would happen if conditions were different',
-                'example': 'What if the rectangle was a square instead?'
+                'type': 'hypothetical_framing',
+                'description': 'Reframe using hypothetical language (what if, suppose) while keeping all conditions and the answer identical',
+                'example': 'Suppose you have a rectangle with length 15 and width 20. What would its area be?'
             },
             {
                 'type': 'interrogative', 
@@ -5032,9 +5040,9 @@ Generate exactly 2 combination transformations (multiple components each):"""
         # Define general variation types for unmapped problems
         general_types = [
             {
-                'type': 'counterfactual_unmapped',
-                'description': 'Create hypothetical scenarios for unmapped problem elements',
-                'instruction': 'Transform into a what-if scenario while preserving the core mathematical relationship'
+                'type': 'hypothetical_framing_unmapped',
+                'description': 'Reframe unmapped problem elements using hypothetical language while keeping all conditions identical',
+                'instruction': 'Reframe using what-if/suppose language while preserving ALL conditions, numbers, and the core mathematical relationship'
             },
             {
                 'type': 'narrative_unmapped', 

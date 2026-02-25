@@ -48,11 +48,31 @@ class UnifiedProgressivePipeline:
         self.data = []
         self.batch_size = config.get('batch_size', 50)
 
-        # Load existing data if file exists
+        # Load existing data if file exists, deduplicating entries from interrupted runs
         if Path(self.unified_file).exists():
             with open(self.unified_file, 'r') as f:
                 self.data = json.load(f)
-            logger.debug(f"📂 Loaded {len(self.data)} existing entries from {self.unified_file}")
+            original_count = len(self.data)
+
+            # Deduplicate: remove entries with same (problem_id, modified_problem, is_baseline/is_variant)
+            seen = set()
+            deduped = []
+            for entry in self.data:
+                key = (
+                    entry.get('problem_id', ''),
+                    entry.get('modified_problem', entry.get('problem', '')),
+                    entry.get('is_baseline', False),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(entry)
+            self.data = deduped
+
+            dupes_removed = original_count - len(self.data)
+            if dupes_removed > 0:
+                logger.debug(f"📂 Loaded {original_count} entries, removed {dupes_removed} duplicates → {len(self.data)} entries from {self.unified_file}")
+            else:
+                logger.debug(f"📂 Loaded {len(self.data)} existing entries from {self.unified_file}")
     
     def save_data(self, stage_name: str):
         """Save current data state with stage tracking."""
@@ -69,13 +89,17 @@ class UnifiedProgressivePipeline:
             'stages_completed': sorted(list(all_stages))
         }
 
-        # Save main data
+        # Save main data atomically (write to temp, then rename)
+        import tempfile
         try:
-            with open(self.unified_file, 'w') as f:
+            dir_name = os.path.dirname(os.path.abspath(self.unified_file))
+            with tempfile.NamedTemporaryFile(mode='w', dir=dir_name, suffix='.json.tmp', delete=False) as f:
+                tmp_path = f.name
                 json.dump(self.data, f, indent=2, default=str)
+            os.replace(tmp_path, self.unified_file)
         except Exception as e:
             logger.debug(f"❌ Error saving unified file: {e}")
-            # Try to save with more robust serialization
+            # Fallback: try direct write with robust serialization
             try:
                 with open(self.unified_file, 'w') as f:
                     json.dump(self.data, f, indent=2, default=lambda x: str(x) if not isinstance(x, (dict, list, str, int, float, bool, type(None))) else x)
@@ -482,36 +506,42 @@ class UnifiedProgressivePipeline:
             all_responses = answer_gen.generate_responses_parallel(all_problems_to_process)
             logger.debug(f"   ✅ Generated {len(all_responses)} responses using batch processing")
 
-            # Step 3: Process responses and organize into baseline cache + variant updates
+            # Step 3: Process responses — baselines FIRST, then variants
+            # (ensures baseline_answers_cache is populated before any variant needs it)
             baseline_answers_cache = {}
             response_dict = {resp.variation_id: resp for resp in all_responses}
 
-            for variation_id, response in response_dict.items():
-                problem_id, entry_type, entry = problem_id_mapping[variation_id]
-
-                # Convert response to data format
-                response_data = {
+            def _response_to_data(response):
+                return {
                     'model_response': response.model_response,
-                    'model_thinking': response.model_response,  # Store full raw response (parsing may fail)
+                    'model_thinking': response.model_response,
                     'model_final_answer': response.final_answer,
                     'response_generation_time': response.generation_time,
                     'response_success': response.success,
                     'response_error_message': response.error_message or '',
-                    'response_timestamp': response.timestamp
+                    'response_timestamp': response.timestamp,
+                    'logit_stats': response.logit_stats,
+                    'token_logprobs': response.token_logprobs
                 }
 
+            # Pass 1: Process all baselines first
+            for variation_id, response in response_dict.items():
+                problem_id, entry_type, entry = problem_id_mapping[variation_id]
                 if entry_type == 'baseline':
-                    # Cache baseline answer for reuse across variants
+                    response_data = _response_to_data(response)
                     baseline_answers_cache[problem_id] = response_data
                     self._update_entry_with_response_data(entry, response_data, is_baseline=True)
-                    logger.debug(f"     ✅ Baseline cached for {problem_id}")
-                else:
-                    # Update variant entry
+                    logger.debug(f"     Baseline cached for {problem_id}")
+
+            # Pass 2: Process all variants (baselines guaranteed to be cached)
+            for variation_id, response in response_dict.items():
+                problem_id, entry_type, entry = problem_id_mapping[variation_id]
+                if entry_type != 'baseline':
+                    response_data = _response_to_data(response)
                     self._update_entry_with_response_data(entry, response_data, is_baseline=False)
-                    # Add cached baseline data
                     if problem_id in baseline_answers_cache:
                         self._add_baseline_data_to_variant(entry, baseline_answers_cache[problem_id])
-                    logger.debug(f"     ✅ Variant processed for {variation_id}")
+                    logger.debug(f"     Variant processed for {variation_id}")
 
         except Exception as e:
             logger.debug(f"❌ Batch processing failed: {e}")
@@ -663,49 +693,63 @@ class UnifiedProgressivePipeline:
         }
 
     def _update_entry_with_response_data(self, entry: Dict[str, Any], response_data: Dict[str, Any], is_baseline: bool):
+        """Update entry with response data. No legacy duplicates - clean schema."""
         if is_baseline:
-            # For baseline entries, update baseline response fields
+            # For baseline entries, update both baseline and variant response fields (they're the same)
             entry.update({
                 'baseline_answer': response_data['model_final_answer'],
                 'baseline_thinking': response_data['model_thinking'],
                 'baseline_response': response_data['model_response'],
                 'baseline_generation_time': response_data['response_generation_time'],
                 'baseline_response_success': response_data['response_success'],
-                'baseline_response_error': response_data['response_error_message'],
+                'baseline_response_error': response_data.get('response_error_message', ''),
                 'baseline_response_timestamp': response_data['response_timestamp'],
 
-                # For baseline entries, variant data is same as baseline
+                # For baseline entries, variant response = baseline response
                 'variant_answer': response_data['model_final_answer'],
                 'variant_thinking': response_data['model_thinking'],
                 'variant_response': response_data['model_response'],
                 'variant_generation_time': response_data['response_generation_time'],
                 'variant_response_success': response_data['response_success'],
-                'variant_response_error': response_data['response_error_message'],
+                'variant_response_error': response_data.get('response_error_message', ''),
                 'variant_response_timestamp': response_data['response_timestamp']
             })
         else:
-            # For variant entries, update variant response fields
+            # For variant entries, only update variant response fields
+            # (baseline fields are populated separately via _add_baseline_data_to_variant)
             entry.update({
                 'variant_answer': response_data['model_final_answer'],
                 'variant_thinking': response_data['model_thinking'],
                 'variant_response': response_data['model_response'],
                 'variant_generation_time': response_data['response_generation_time'],
                 'variant_response_success': response_data['response_success'],
-                'variant_response_error': response_data['response_error_message'],
+                'variant_response_error': response_data.get('response_error_message', ''),
                 'variant_response_timestamp': response_data['response_timestamp']
             })
 
-        # Add legacy fields for backward compatibility
-        entry.update({
-            'model_final_answer': response_data['model_final_answer'],
-            'model_thinking': response_data['model_thinking'],
-            'model_response': response_data['model_response'],
-            'response_generation_time': response_data['response_generation_time'],
-            'response_success': response_data['response_success'],
-            'response_error_message': response_data['response_error_message'],
-            'response_timestamp': response_data['response_timestamp'],
-            'has_model_response': response_data['response_success']
-        })
+        # Add logit statistics if available (when using VLLMClientWithLogits)
+        if 'logit_stats' in response_data and response_data['logit_stats']:
+            logit_stats = response_data['logit_stats']
+            entry.update({
+                'response_mean_logprob': logit_stats.get('mean_logprob', 0.0),
+                'response_min_logprob': logit_stats.get('min_logprob', 0.0),
+                'response_max_logprob': logit_stats.get('max_logprob', 0.0),
+                'response_mean_entropy': logit_stats.get('mean_entropy', 0.0),
+                'response_max_entropy': logit_stats.get('max_entropy', 0.0),
+                'response_mean_top1_prob': logit_stats.get('mean_top1_prob', 0.0),
+                'response_first_token_logprob': logit_stats.get('first_token_logprob', 0.0),
+                'response_first_token_prob': logit_stats.get('first_token_prob', 0.0),
+                'response_num_tokens': logit_stats.get('num_tokens', 0)
+            })
+        # Add full per-token logprobs if available
+        if 'token_logprobs' in response_data and response_data['token_logprobs']:
+            entry['response_token_logprobs'] = response_data['token_logprobs']
+
+        # Set target model name from config (response_model is the target being evaluated)
+        response_model = self.config.get('response_model', '')
+        if response_model:
+            # Extract model name from path (e.g., "ibm-granite/granite-3.3-8b-instruct" -> "granite-3.3-8b-instruct")
+            entry['target_model_name'] = response_model.split('/')[-1]
 
         # Mark response stage as complete
         if 'stages_completed' not in entry:
@@ -908,7 +952,7 @@ class UnifiedProgressivePipeline:
         # Choose evaluation strategy based on client type
         client_type = self.config.get('eval_client_type', self.config.get('client_type', 'rits'))
 
-        if client_type == 'vllm':
+        if client_type in ['vllm', 'vllm_logits']:
             logger.debug("🚀 Using cross-problem batched evaluation for VLLM")
             self._evaluate_all_problems_cross_batched(problems_dict)
         else:
@@ -925,13 +969,13 @@ class UnifiedProgressivePipeline:
             if not baseline:
                 continue
 
-            # Get baseline response data with fallback to raw response
-            baseline_answer = baseline.get('model_final_answer', '')
+            # Get baseline response data (clean schema: baseline_answer, old schema: model_final_answer)
+            baseline_answer = baseline.get('baseline_answer', '') or baseline.get('model_final_answer', '')
             if not baseline_answer:
-                baseline_answer = baseline.get('model_response', '')  # Fallback to raw response
+                baseline_answer = baseline.get('baseline_response', '') or baseline.get('model_response', '')
 
-            baseline_thinking = baseline.get('model_thinking', '')
-            baseline_response = baseline.get('model_response', '')
+            baseline_thinking = baseline.get('baseline_thinking', '') or baseline.get('model_thinking', '')
+            baseline_response = baseline.get('baseline_response', '') or baseline.get('model_response', '')
             baseline_success = baseline.get('response_success', False)
             ground_truth = baseline.get('ground_truth_answer', '')
 
@@ -963,39 +1007,32 @@ class UnifiedProgressivePipeline:
                     problem_context=baseline.get('original_problem', '')
                 )
 
-                # Update baseline evaluation with LLM judge results
+                # Update baseline evaluation with LLM judge results (clean schema - no duplicates)
+                judge_model_name = self.config.get('judge_model', self.config.get('response_model', 'unknown'))
                 baseline.update({
-                    'baseline_model_answer': baseline_answer,
-                    'baseline_model_thinking': baseline_thinking,
-                    'baseline_model_response': baseline_response,
-                    'baseline_response_success': baseline_success,
                     'baseline_matches_ground_truth': baseline_eval['is_correct'],
                     'baseline_confidence': baseline_eval['confidence'],
                     'baseline_explanation': baseline_eval['explanation'],
-                    'baseline_evaluation_method': baseline_eval.get('method_used', 'unknown'),
                     'variant_matches_ground_truth': baseline_eval['is_correct'],  # Same for baseline
                     'variant_confidence': baseline_eval['confidence'],
-                    'variant_evaluation_method': baseline_eval.get('method_used', 'unknown'),
+                    'variant_explanation': baseline_eval['explanation'],
+                    'evaluation_method': baseline_eval.get('method_used', 'unknown'),
                     'baseline_variant_consistent': True,  # Always true for baseline
                     'positive_drift': False,  # No drift for baseline
                     'negative_drift': False,
                     'has_drift': False,
-                    'has_improvement': False
+                    'judge_model_name': judge_model_name
                 })
             else:
-                # No ground truth available
+                # No ground truth available (clean schema)
                 baseline.update({
-                    'baseline_model_answer': baseline_answer,
-                    'baseline_model_thinking': baseline_thinking,
-                    'baseline_model_response': baseline_response,
-                    'baseline_response_success': baseline_success,
                     'baseline_matches_ground_truth': False,
                     'variant_matches_ground_truth': False,
                     'baseline_variant_consistent': True,
                     'positive_drift': False,
                     'negative_drift': False,
                     'has_drift': False,
-                    'has_improvement': False
+                    'judge_model_name': self.config.get('judge_model', 'unknown')
                 })
 
             # Update variant evaluations using batched evaluation
@@ -1031,14 +1068,14 @@ class UnifiedProgressivePipeline:
             if not baseline:
                 continue
 
-            # Get baseline response data with fallback to raw response
-            baseline_answer = baseline.get('model_final_answer', '')
+            # Get baseline response data (clean schema: baseline_answer, old schema: model_final_answer)
+            baseline_answer = baseline.get('baseline_answer', '') or baseline.get('model_final_answer', '')
             if not baseline_answer:
-                baseline_answer = baseline.get('model_response', '')  # Fallback to raw response
+                baseline_answer = baseline.get('baseline_response', '') or baseline.get('model_response', '')
 
-            baseline_thinking = baseline.get('model_thinking', '')
-            baseline_response = baseline.get('model_response', '')
-            baseline_success = baseline.get('response_success', False)
+            baseline_thinking = baseline.get('baseline_thinking', '') or baseline.get('model_thinking', '')
+            baseline_response = baseline.get('baseline_response', '') or baseline.get('model_response', '')
+            baseline_success = baseline.get('response_success', False) or baseline.get('baseline_response_success', False)
             ground_truth = baseline.get('ground_truth_answer', '')
 
             # Initialize answer matcher once globally
@@ -1077,9 +1114,10 @@ class UnifiedProgressivePipeline:
 
                 # Variant comparisons
                 for variant in variants:
-                    variant_answer = variant.get('model_final_answer', '')
+                    # Clean schema: variant_answer, old schema: model_final_answer
+                    variant_answer = variant.get('variant_answer', '') or variant.get('model_final_answer', '')
                     if not variant_answer:
-                        variant_answer = variant.get('model_response', '')  # Fallback to raw response
+                        variant_answer = variant.get('variant_response', '') or variant.get('model_response', '')
 
                     if variant_answer:
                         all_comparisons.append((variant_answer, ground_truth))
@@ -1101,7 +1139,7 @@ class UnifiedProgressivePipeline:
         # Step 2: Batch ALL comparisons together (cross-problem)
         client_type = self.config.get('eval_client_type', self.config.get('client_type', 'rits'))
         eval_batch_size = self.config.get('response_eval_batch_size', self.batch_size)
-        if client_type == 'vllm':
+        if client_type in ['vllm', 'vllm_logits']:
             judge_batch_size = eval_batch_size
             logger.debug(f"🔄 Using VLLM eval batch size: {judge_batch_size}")
         else:
@@ -1143,32 +1181,33 @@ class UnifiedProgressivePipeline:
                 # Cache baseline result for reuse
                 baseline_results_cache[problem_id] = result
 
-                # Update baseline entry
+                # Update baseline entry (clean schema field names)
+                judge_model_name = self.config.get('judge_model', self.config.get('response_model', 'unknown'))
                 if metadata['ground_truth']:
                     entry.update({
-                        'baseline_model_answer': metadata['baseline_answer'],
-                        'baseline_model_thinking': metadata['baseline_thinking'],
-                        'baseline_model_response': metadata['baseline_response'],
+                        'baseline_answer': metadata['baseline_answer'],
+                        'baseline_thinking': metadata['baseline_thinking'],
+                        'baseline_response': metadata['baseline_response'],
                         'baseline_response_success': metadata['baseline_success'],
                         'baseline_matches_ground_truth': result,
                         'baseline_confidence': 'high' if result else 'medium',
                         'baseline_explanation': f'LLM judge evaluation: {result}',
-                        'baseline_evaluation_method': 'llm_judge_cross_batched',
+                        'evaluation_method': 'llm_judge_cross_batched',
                         'variant_matches_ground_truth': result,  # Same for baseline
                         'variant_confidence': 'high' if result else 'medium',
-                        'variant_evaluation_method': 'llm_judge_cross_batched',
+                        'variant_explanation': f'LLM judge evaluation: {result}',
                         'baseline_variant_consistent': True,  # Always true for baseline
                         'positive_drift': False,  # No drift for baseline
                         'negative_drift': False,
                         'has_drift': False,
-                        'has_improvement': False
+                        'judge_model_name': judge_model_name
                     })
                 else:
                     # No ground truth
                     entry.update({
-                        'baseline_model_answer': metadata['baseline_answer'],
-                        'baseline_model_thinking': metadata['baseline_thinking'],
-                        'baseline_model_response': metadata['baseline_response'],
+                        'baseline_answer': metadata['baseline_answer'],
+                        'baseline_thinking': metadata['baseline_thinking'],
+                        'baseline_response': metadata['baseline_response'],
                         'baseline_response_success': metadata['baseline_success'],
                         'baseline_matches_ground_truth': False,
                         'variant_matches_ground_truth': False,
@@ -1176,7 +1215,7 @@ class UnifiedProgressivePipeline:
                         'positive_drift': False,
                         'negative_drift': False,
                         'has_drift': False,
-                        'has_improvement': False
+                        'judge_model_name': judge_model_name
                     })
 
             else:  # variant
@@ -1188,28 +1227,28 @@ class UnifiedProgressivePipeline:
                 positive_drift = variant_result and not baseline_result
                 negative_drift = not variant_result and baseline_result
 
-                # Update variant entry
+                # Update variant entry (clean schema field names)
+                judge_model_name = self.config.get('judge_model', self.config.get('response_model', 'unknown'))
                 entry.update({
-                    'baseline_model_answer': metadata['baseline_answer'],
-                    'baseline_model_thinking': metadata['baseline_thinking'],
-                    'baseline_model_response': metadata['baseline_response'],
+                    'baseline_answer': metadata['baseline_answer'],
+                    'baseline_thinking': metadata['baseline_thinking'],
+                    'baseline_response': metadata['baseline_response'],
                     'baseline_response_success': metadata['baseline_success'],
 
                     'baseline_matches_ground_truth': baseline_result,
                     'baseline_confidence': 'high' if baseline_result else 'medium',
                     'baseline_explanation': f'LLM judge evaluation: {baseline_result}',
-                    'baseline_evaluation_method': 'llm_judge_cross_batched',
 
                     'variant_matches_ground_truth': variant_result,
                     'variant_confidence': 'high' if variant_result else 'medium',
                     'variant_explanation': f'LLM judge evaluation: {variant_result}',
-                    'variant_evaluation_method': 'llm_judge_cross_batched',
 
+                    'evaluation_method': 'llm_judge_cross_batched',
                     'positive_drift': positive_drift,
                     'negative_drift': negative_drift,
                     'has_drift': positive_drift or negative_drift,
                     'baseline_variant_consistent': baseline_result == variant_result,
-                    'has_improvement': positive_drift  # Legacy compatibility
+                    'judge_model_name': judge_model_name
                 })
 
                 if positive_drift:
@@ -1251,14 +1290,15 @@ class UnifiedProgressivePipeline:
         variant_indices = []
 
         for i, variant in enumerate(variants):
-            variant_answer = variant.get('model_final_answer', '')
+            # Clean schema: variant_answer, old schema: model_final_answer
+            variant_answer = variant.get('variant_answer', '') or variant.get('model_final_answer', '')
             if not variant_answer:
-                variant_answer = variant.get('model_response', '')  # Fallback to raw response
+                variant_answer = variant.get('variant_response', '') or variant.get('model_response', '')
 
-            # Add baseline comparison data to variant
-            variant['baseline_model_answer'] = baseline_answer
-            variant['baseline_model_thinking'] = baseline_thinking
-            variant['baseline_model_response'] = baseline_response
+            # Add baseline comparison data to variant (clean schema field names)
+            variant['baseline_answer'] = baseline_answer
+            variant['baseline_thinking'] = baseline_thinking
+            variant['baseline_response'] = baseline_response
             variant['baseline_response_success'] = baseline_success
 
             if ground_truth and baseline_answer and variant_answer:
@@ -1285,7 +1325,7 @@ class UnifiedProgressivePipeline:
         # Determine batch size based on client type
         client_type = self.config.get('eval_client_type', self.config.get('client_type', 'rits'))
         eval_batch_size = self.config.get('response_eval_batch_size', self.batch_size)
-        if client_type == 'vllm':
+        if client_type in ['vllm', 'vllm_logits']:
             judge_batch_size = eval_batch_size
             logger.debug(f"🔄 Using VLLM eval batch size: {judge_batch_size}")
         else:
@@ -1329,23 +1369,23 @@ class UnifiedProgressivePipeline:
             positive_drift = variant_result and not baseline_result  # Variant correct, baseline wrong
             negative_drift = not variant_result and baseline_result  # Variant wrong, baseline correct
 
-            # Update variant with results
+            # Update variant with results (clean schema - no duplicates)
+            judge_model_name = self.config.get('judge_model', self.config.get('response_model', 'unknown'))
             variant.update({
                 'baseline_matches_ground_truth': baseline_result,
                 'baseline_confidence': 'high' if baseline_result else 'medium',
                 'baseline_explanation': f'LLM judge evaluation: {baseline_result}',
-                'baseline_evaluation_method': 'llm_judge_batched',
 
                 'variant_matches_ground_truth': variant_result,
                 'variant_confidence': 'high' if variant_result else 'medium',
                 'variant_explanation': f'LLM judge evaluation: {variant_result}',
-                'variant_evaluation_method': 'llm_judge_batched',
 
+                'evaluation_method': 'llm_judge_batched',
                 'positive_drift': positive_drift,
                 'negative_drift': negative_drift,
                 'has_drift': positive_drift or negative_drift,
                 'baseline_variant_consistent': baseline_result == variant_result,
-                'has_improvement': positive_drift  # Legacy compatibility
+                'judge_model_name': judge_model_name
             })
 
             if positive_drift:
@@ -1358,30 +1398,50 @@ class UnifiedProgressivePipeline:
         if not csv_path:
             csv_path = self.unified_file.replace('.json', '.csv')
 
-        # Define column order for CSV
+        # Define column order for CSV (clean schema)
         priority_columns = [
-            # Problem identification
-            'problem_id', 'variation_id', 'variation_type', 'is_baseline', 'is_variant',
+            # === IDENTIFICATION ===
+            'problem_id', 'variation_id', 'variation_index', 'is_baseline',
             'variant_number', 'total_variants_for_problem',
 
-            # Problem content
-            'original_problem', 'modified_problem', 'baseline_problem',
+            # === PROBLEM CONTENT ===
+            'original_problem', 'modified_problem', 'ground_truth_answer',
 
-            # Ground truth and evaluation
-            'ground_truth_answer', 'baseline_model_answer', 'baseline_model_thinking',
+            # === DRIFT & EVALUATION ===
+            'positive_drift', 'negative_drift', 'has_drift',
             'baseline_matches_ground_truth', 'variant_matches_ground_truth',
-            'baseline_variant_consistent', 'has_drift', 'has_improvement',
+            'baseline_variant_consistent',
+            'baseline_confidence', 'variant_confidence',
+            'evaluation_method',
 
-            # Transformation details
-            'transformation_type', 'original_component', 'new_component',
+            # === TRANSFORMATION DETAILS ===
+            'transformation_type', 'variation_axis',
+            'original_component', 'new_component',
             'debugging_capability', 'generation_method', 'detection_method',
+            'cluster_id', 'cluster_size',
 
-            # Model response data
-            'has_model_response', 'response_success', 'model_final_answer',
-            'model_thinking', 'model_response', 'response_generation_time',
+            # === BASELINE RESPONSE ===
+            'baseline_answer', 'baseline_thinking', 'baseline_response',
+            'baseline_generation_time', 'baseline_response_success',
 
-            # Metadata
-            'stages_completed', 'confidence', 'variation_index'
+            # === VARIANT RESPONSE ===
+            'variant_answer', 'variant_thinking', 'variant_response',
+            'variant_generation_time', 'variant_response_success',
+
+            # === LOGIT STATISTICS ===
+            'response_mean_logprob', 'response_min_logprob', 'response_max_logprob',
+            'response_mean_entropy', 'response_max_entropy', 'response_mean_top1_prob',
+            'response_first_token_logprob', 'response_first_token_prob', 'response_num_tokens',
+
+            # === VALIDATION ===
+            'validation_passed', 'validation_attempts', 'validation_corrected',
+            'semantic_similarity_score',
+
+            # === METADATA ===
+            'benchmark_name', 'target_model_name', 'judge_model_name',
+            'variation_model_name', 'validation_model_name',
+            'problem_length_chars', 'variation_length_chars',
+            'problem_category', 'stages_completed'
         ]
 
         df = pd.DataFrame(self.data)
@@ -1562,18 +1622,19 @@ Examples:
                        help='Input problems file (ANY format: .json/.jsonl/.txt/.csv) - or use "test" for hardcoded example')
     
     # Configuration
-    parser.add_argument('--client-type', default='rits', choices=['rits', 'openai'],
-                       help='Model client type (default: rits)')
+    parser.add_argument('--client-type', default='rits',
+                       choices=['rits', 'openai', 'vllm', 'vllm_logits', 'ollama', 'ollama_logits', 'groq'],
+                       help='Model client type (default: rits). Optional when using client/model format.')
     parser.add_argument('--model-name', default='mistral_small_3_2_instruct',
-                       help='Model for variation generation (default: mistral_small_3_2_instruct)')
+                       help='Generator model. Accepts "client/model" format (e.g., ollama/qwen3:8b)')
     parser.add_argument('--eval-model', default='mistral_small_3_2_instruct',
-                       help='Model being evaluated for robustness (gets responses for variations)')
+                       help='Target model for evaluation. Accepts "client/model" format.')
     parser.add_argument('--response-model', default=None,
-                       help='DEPRECATED: Use --eval-model instead')
+                       help='DEPRECATED: Use --eval-model instead. Accepts "client/model" format.')
     parser.add_argument('--use-llm-judge', action='store_true',
                        help='Use LLM judge for answer evaluation (default: string matching)')
     parser.add_argument('--judge-model', default=None,
-                       help='Model to use as LLM judge (default: same as eval-model)')
+                       help='Judge model. Accepts "client/model" format (default: same as eval-model)')
     parser.add_argument('--num-variations', type=int, default=3,
                        help='Number of variations per problem (default: 3)')
     parser.add_argument('--max-workers', type=int, default=4,
@@ -1607,7 +1668,20 @@ Examples:
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
     
     args = parser.parse_args()
-    
+
+    # ── Resolve client/model-id specs ──
+    from benchdrift.pipeline.unified_batched_pipeline_semantic import parse_model_spec, VALID_CLIENT_TYPES
+    _gen_client, args.model_name = parse_model_spec(args.model_name, args.client_type)
+    _eval_client, args.eval_model = parse_model_spec(args.eval_model, args.client_type)
+    _judge_client = None
+    if args.judge_model:
+        _judge_client, args.judge_model = parse_model_spec(args.judge_model, args.client_type)
+    if args.response_model:
+        _resp_client, args.response_model = parse_model_spec(args.response_model, args.client_type)
+
+    if _gen_client and _gen_client in VALID_CLIENT_TYPES:
+        args.client_type = _gen_client
+
     # Validation
     if args.all_stages and not args.input:
         logger.debug("🧪 No --input specified, will use hardcoded test example")
@@ -1616,7 +1690,7 @@ Examples:
     if args.stage == 'variations' and not args.input:
         logger.debug("🧪 No --input specified, will use hardcoded test example")
         args.input = 'test'  # Set to trigger test mode
-    
+
     # Handle backward compatibility for response_model
     eval_model = args.eval_model
     if args.response_model is not None:
