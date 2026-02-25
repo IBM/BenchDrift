@@ -21,10 +21,38 @@ class ComprehensiveResultsVisualizer:
             df: DataFrame with columns for variations, drift, transformation types
         """
         self.df = df
-        self.variants_df = df[df['is_variant'].fillna(False)].copy()
+        # Support both old (is_variant) and new (~is_baseline) schema
+        if 'is_variant' in df.columns:
+            self.variants_df = df[df['is_variant'].fillna(False)].copy()
+        else:
+            self.variants_df = df[~df['is_baseline'].fillna(True)].copy()
 
         # Fix transformation type prefixes (handle both old and new)
         self._normalize_transformation_types()
+
+    def _get_variants(self, df=None):
+        """Get variant rows, supporting both old (is_variant) and new (~is_baseline) schema."""
+        if df is None:
+            df = self.df
+        if 'is_variant' in df.columns:
+            return df[df['is_variant'].fillna(False)].copy()
+        else:
+            return df[~df['is_baseline'].fillna(True)].copy()
+
+    def _get_positive_drift(self, variants):
+        """Get positive drift, supporting both old (has_improvement) and new (positive_drift) schema."""
+        if 'positive_drift' in variants.columns:
+            return variants['positive_drift'].fillna(False)
+        elif 'has_improvement' in variants.columns:
+            return variants['has_improvement'].fillna(False)
+        return pd.Series([False] * len(variants), index=variants.index)
+
+    def _get_negative_drift(self, variants):
+        """Get negative drift, using actual column if available, else derive from has_drift."""
+        if 'negative_drift' in variants.columns:
+            return variants['negative_drift'].fillna(False).astype(bool)
+        # Fallback: derive from has_drift & ~positive_drift
+        return (variants['has_drift'].astype(bool) & ~self._get_positive_drift(variants).astype(bool))
 
     def _normalize_transformation_types(self):
         """Normalize transformation type names for consistent handling"""
@@ -119,24 +147,21 @@ class ComprehensiveResultsVisualizer:
 
     def _plot_drift_overview(self, ax):
         """Plot overall drift statistics from baseline"""
-        variants = self.df[self.df['is_variant']].copy()
+        variants = self._get_variants()
 
         if 'has_drift' not in variants.columns:
             ax.text(0.5, 0.5, 'No drift data available',
                    ha='center', va='center', transform=ax.transAxes)
             return
 
-        # Ensure boolean columns
+        # Ensure boolean columns - support both old and new schema
         variants['has_drift'] = variants['has_drift'].astype(bool)
-        if 'has_improvement' in variants.columns:
-            variants['has_improvement'] = variants['has_improvement'].astype(bool)
-        else:
-            variants['has_improvement'] = False
+        variants['_positive_drift'] = self._get_positive_drift(variants).astype(bool)
 
         # Calculate statistics
         total = len(variants)
-        negative_drift = (variants['has_drift'] & ~variants['has_improvement']).sum()
-        positive_drift = variants['has_improvement'].sum()
+        positive_drift = variants['_positive_drift'].sum()
+        negative_drift = self._get_negative_drift(variants).sum()
         no_drift = (~variants['has_drift']).sum()
 
         # Calculate percentages
@@ -182,7 +207,7 @@ class ComprehensiveResultsVisualizer:
 
     def _plot_top_problematic_variations(self, ax):
         """Plot top 5 variation types with highest drift rates"""
-        variants = self.df[self.df['is_variant']].copy()
+        variants = self._get_variants().copy()
 
         if 'has_drift' not in variants.columns or 'transformation_type' not in variants.columns:
             ax.text(0.5, 0.5, 'No variation type data',
@@ -236,31 +261,24 @@ class ComprehensiveResultsVisualizer:
 
     def _plot_drift_breakdown(self, ax, drift_type='negative'):
         """Plot top 5 variation types by drift category (negative or positive)"""
-        variants = self.df[self.df['is_variant']].copy()
+        variants = self._get_variants().copy()
 
         if 'has_drift' not in variants.columns:
             ax.text(0.5, 0.5, f'No {drift_type} drift data',
                    ha='center', va='center', transform=ax.transAxes)
             return
 
-        # Ensure boolean columns
+        # Ensure boolean columns - support both old and new schema
         variants['has_drift'] = variants['has_drift'].astype(bool)
-        if 'has_improvement' in variants.columns:
-            variants['has_improvement'] = variants['has_improvement'].astype(bool)
-        else:
-            variants['has_improvement'] = False
+        variants['_positive_drift'] = self._get_positive_drift(variants).astype(bool)
 
         # Filter by drift type
         if drift_type == 'negative':
-            drift_variants = variants[variants['has_drift'] & ~variants['has_improvement']].copy()
+            drift_variants = variants[variants['has_drift'] & ~variants['_positive_drift']].copy()
             title = 'Top 5 Variation Types: Negative Drift'
             color_map = plt.cm.Reds
         else:
-            if 'has_improvement' not in variants.columns:
-                ax.text(0.5, 0.5, 'No positive drift data',
-                       ha='center', va='center', transform=ax.transAxes)
-                return
-            drift_variants = variants[variants['has_improvement']].copy()
+            drift_variants = variants[variants['_positive_drift']].copy()
             title = 'Top 5 Variation Types: Positive Drift'
             color_map = plt.cm.Greens
 
@@ -302,7 +320,7 @@ class ComprehensiveResultsVisualizer:
 
     def _print_comprehensive_summary(self):
         """Print detailed text summary of results"""
-        variants = self.df[self.df['is_variant']].copy()
+        variants = self._get_variants().copy()
         problems_count = self.df['problem_id'].nunique()
         variants_count = len(variants)
 
@@ -317,17 +335,14 @@ class ComprehensiveResultsVisualizer:
         print(f"   • Variations per Problem: {variants_count/problems_count:.1f} avg")
 
         if 'has_drift' in variants.columns:
-            # Ensure boolean columns
+            # Ensure boolean columns - support both old and new schema
             variants['has_drift'] = variants['has_drift'].astype(bool)
-            if 'has_improvement' in variants.columns:
-                variants['has_improvement'] = variants['has_improvement'].astype(bool)
-            else:
-                variants['has_improvement'] = False
+            variants['_positive_drift'] = self._get_positive_drift(variants).astype(bool)
 
             # Calculate drift statistics
             total = len(variants)
-            negative_drift = (variants['has_drift'] & ~variants['has_improvement']).sum()
-            positive_drift = variants['has_improvement'].sum()
+            positive_drift = variants['_positive_drift'].sum()
+            negative_drift = self._get_negative_drift(variants).sum()
             no_drift = (~variants['has_drift']).sum()
 
             neg_pct = (negative_drift / total) * 100
@@ -367,7 +382,7 @@ class ComprehensiveResultsVisualizer:
             # Negative drift details
             if negative_drift > 0:
                 print("\n🔴 Negative Drift Breakdown (Top 5):")
-                neg_variants = variants[variants['has_drift'] & ~variants['has_improvement']]
+                neg_variants = variants[self._get_negative_drift(variants)]
                 neg_counts = neg_variants['transformation_type'].value_counts().head(5)
                 for i, (trans_type, count) in enumerate(neg_counts.items(), 1):
                     clean_name = self._clean_transformation_name(trans_type)
@@ -377,7 +392,7 @@ class ComprehensiveResultsVisualizer:
             # Positive drift details
             if positive_drift > 0:
                 print("\n🟢 Positive Drift Breakdown (Top 5):")
-                pos_variants = variants[variants['has_improvement']]
+                pos_variants = variants[variants['_positive_drift']]
                 pos_counts = pos_variants['transformation_type'].value_counts().head(5)
                 for i, (trans_type, count) in enumerate(pos_counts.items(), 1):
                     clean_name = self._clean_transformation_name(trans_type)
@@ -391,7 +406,7 @@ class ComprehensiveResultsVisualizer:
             })
             cat_stats.columns = ['drift_count', 'total', 'drift_rate']
 
-            for category in ['Generic', 'Combination', 'Persona', 'Other']:
+            for category in ['Generic', 'Cluster', 'Combination', 'Persona', 'Long Context', 'Other']:
                 if category in cat_stats.index:
                     stats = cat_stats.loc[category]
                     print(f"   • {category}: {int(stats['total'])} variations, "
@@ -407,7 +422,7 @@ class ComprehensiveResultsVisualizer:
         Show concrete examples of positive and negative drift cases.
         For top N variation types, shows ground truth, baseline answer, and variant answer.
         """
-        variants = self.df[self.df['is_variant'] == True].copy()
+        variants = self._get_variants().copy()
 
         if 'has_drift' not in variants.columns:
             print("⚠️  No drift data available for examples")
@@ -418,7 +433,8 @@ class ComprehensiveResultsVisualizer:
         print("="*80)
 
         # === NEGATIVE DRIFT EXAMPLES ===
-        neg_variants = variants[variants['has_drift'] & ~variants.get('has_improvement', False)].copy()
+        variants['_positive_drift'] = self._get_positive_drift(variants).astype(bool)
+        neg_variants = variants[variants['has_drift'] & ~variants['_positive_drift']].copy()
 
         if len(neg_variants) > 0:
             print("\n" + "🔴"*40)
@@ -474,61 +490,60 @@ class ComprehensiveResultsVisualizer:
                 print()
 
         # === POSITIVE DRIFT EXAMPLES ===
-        if 'has_improvement' in variants.columns:
-            pos_variants = variants[variants['has_improvement']].copy()
+        pos_variants = variants[variants['_positive_drift']].copy()
 
-            if len(pos_variants) > 0:
-                print("\n" + "🟢"*40)
-                print("POSITIVE DRIFT EXAMPLES (Model Performance Improved)")
-                print("🟢"*40 + "\n")
+        if len(pos_variants) > 0:
+            print("\n" + "🟢"*40)
+            print("POSITIVE DRIFT EXAMPLES (Model Performance Improved)")
+            print("🟢"*40 + "\n")
 
-                # Get top N transformation types by count
-                pos_type_counts = pos_variants['transformation_type'].value_counts().head(top_n)
+            # Get top N transformation types by count
+            pos_type_counts = pos_variants['transformation_type'].value_counts().head(top_n)
 
-                for rank, (trans_type, count) in enumerate(pos_type_counts.items(), 1):
-                    # Get one example from this type
-                    example = pos_variants[pos_variants['transformation_type'] == trans_type].iloc[0]
+            for rank, (trans_type, count) in enumerate(pos_type_counts.items(), 1):
+                # Get one example from this type
+                example = pos_variants[pos_variants['transformation_type'] == trans_type].iloc[0]
 
-                    clean_type = self._clean_transformation_name(trans_type)
+                clean_type = self._clean_transformation_name(trans_type)
 
-                    print(f"{'─'*80}")
-                    print(f"Example {rank}: {clean_type}")
-                    print(f"{'─'*80}")
-                    print(f"\n📝 ORIGINAL PROBLEM:")
-                    print(f"   {example.get('original_problem', 'N/A')}")
+                print(f"{'─'*80}")
+                print(f"Example {rank}: {clean_type}")
+                print(f"{'─'*80}")
+                print(f"\n📝 ORIGINAL PROBLEM:")
+                print(f"   {example.get('original_problem', 'N/A')}")
 
-                    print(f"\n📝 VARIATION:")
-                    print(f"   {example.get('modified_problem', 'N/A')}")
+                print(f"\n📝 VARIATION:")
+                print(f"   {example.get('modified_problem', 'N/A')}")
 
-                    print(f"\n✅ GROUND TRUTH ANSWER:")
-                    print(f"   {example.get('ground_truth_answer', 'N/A')}")
+                print(f"\n✅ GROUND TRUTH ANSWER:")
+                print(f"   {example.get('ground_truth_answer', 'N/A')}")
 
-                    # Find baseline answer for this problem
-                    baseline = self.df[(self.df['is_baseline']) &
-                                      (self.df['problem_id'] == example.get('problem_id'))].iloc[0] if len(self.df[self.df['is_baseline']]) > 0 else None
+                # Find baseline answer for this problem
+                baseline = self.df[(self.df['is_baseline']) &
+                                  (self.df['problem_id'] == example.get('problem_id'))].iloc[0] if len(self.df[self.df['is_baseline']]) > 0 else None
 
-                    if baseline is not None:
-                        baseline_ans = baseline.get('baseline_answer') or baseline.get('baseline_model_answer') or baseline.get('model_final_answer', 'N/A')
-                        baseline_correct = baseline.get('baseline_matches_ground_truth', False)
-                        print(f"\n✗ BASELINE ANSWER (Original Problem):")
-                        print(f"   {baseline_ans}")
-                        print(f"   Status: {'Correct' if baseline_correct else 'Incorrect'}")
+                if baseline is not None:
+                    baseline_ans = baseline.get('baseline_answer') or baseline.get('variant_answer', 'N/A')
+                    baseline_correct = baseline.get('baseline_matches_ground_truth', False)
+                    print(f"\n✗ BASELINE ANSWER (Original Problem):")
+                    print(f"   {baseline_ans}")
+                    print(f"   Status: {'Correct' if baseline_correct else 'Incorrect'}")
 
-                    variant_ans = example.get('variant_answer') or example.get('model_final_answer', 'N/A')
-                    variant_correct = example.get('variant_matches_ground_truth', False)
-                    print(f"\n✓ VARIANT ANSWER (Positive Drift):")
-                    print(f"   {variant_ans}")
-                    print(f"   Status: {'Correct' if variant_correct else 'Incorrect'}")
+                variant_ans = example.get('variant_answer', 'N/A')
+                variant_correct = example.get('variant_matches_ground_truth', False)
+                print(f"\n✓ VARIANT ANSWER (Positive Drift):")
+                print(f"   {variant_ans}")
+                print(f"   Status: {'Correct' if variant_correct else 'Incorrect'}")
 
-                    # Show drift details
-                    if 'baseline_correctness' in example and 'variant_correctness' in example:
-                        print(f"\n📊 DRIFT DETAILS:")
-                        print(f"   Baseline: {example['baseline_correctness']}")
-                        print(f"   Variant: {example['variant_correctness']}")
-                        print(f"   Change: {example['baseline_correctness']} → {example['variant_correctness']} (IMPROVEMENT)")
+                # Show drift details
+                if 'baseline_correctness' in example and 'variant_correctness' in example:
+                    print(f"\n📊 DRIFT DETAILS:")
+                    print(f"   Baseline: {example['baseline_correctness']}")
+                    print(f"   Variant: {example['variant_correctness']}")
+                    print(f"   Change: {example['baseline_correctness']} → {example['variant_correctness']} (IMPROVEMENT)")
 
-                    print(f"\n💡 IMPACT: This variation type caused {count} positive drift cases")
-                    print()
+                print(f"\n💡 IMPACT: This variation type caused {count} positive drift cases")
+                print()
 
         print("="*80)
         print("✅ Concrete examples show how variations affect model performance")

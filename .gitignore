@@ -64,3 +64,9 @@ figures/*.pdf
 
 # Duplicate config
 notebooks/config/
+
+# v2 additions
+experiments/
+*.egg-info/
+.claude/
+CLAUDE.md

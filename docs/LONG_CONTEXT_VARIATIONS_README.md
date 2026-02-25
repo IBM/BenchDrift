@@ -54,34 +54,37 @@ The variations are grounded in research from:
 
 ### Command Line
 
-Add the `--enable-long-context` flag to enable long-context variations:
+Include `long_context` in the `--use-axes` flag to enable long-context variations:
 
 ```bash
-python unified_batched_pipeline.py \
+python -m benchdrift.pipeline.unified_batched_pipeline_semantic \
   --input long_context_prompts.jsonl \
   --unified-file results.json \
   --all-stages \
-  --enable-long-context \
+  --use-axes "all" \
+  --model-name ollama/qwen3:8b \
+  --response-model ollama/mistral:7b \
   --batch-size 50
+```
+
+Or enable only the long-context axis:
+```bash
+--use-axes "long_context"
 ```
 
 ### Python API
 
 ```python
-from comprehensive_variation_engine_v2 import ComprehensiveVariationEngine
-from long_context_variation_engine import LongContextVariationEngine
+from benchdrift.pipeline.comprehensive_variation_engine_v2 import ComprehensiveVariationEngine
+from benchdrift.pipeline.long_context_variation_engine import LongContextVariationEngine
 
 # Initialize with model client
 engine = ComprehensiveVariationEngine(model_client=your_model_client)
 
-# Generate variations with long-context mode enabled
-variations = engine.generate_comprehensive_variations(
-    problem=long_context_prompt,
-    enable_long_context=True,
-    max_variations=20
-)
+# Long-context variations are generated when the long_context axis is enabled
+# via --use-axes or the enabled_axes config parameter
 
-# Access long-context specific variations
+# Access long-context specific variations from results
 for var in variations:
     if 'long_context' in var.get('generation_method', ''):
         print(f"Type: {var['transformation_type']}")
@@ -93,7 +96,7 @@ for var in variations:
 You can also use the long-context engine directly:
 
 ```python
-from long_context_variation_engine import LongContextVariationEngine
+from benchdrift.pipeline.long_context_variation_engine import LongContextVariationEngine
 
 # Initialize
 lc_engine = LongContextVariationEngine(model_client=your_model_client)
@@ -111,7 +114,7 @@ variations = lc_engine.generate_long_context_variations(
 
 ## When to Use Long-Context Mode
 
-Enable `--enable-long-context` when your prompts have:
+Include `long_context` in `--use-axes` when your prompts have:
 
 1. **Extensive grounding context** (>500 tokens)
 2. **Multiple sections** (rules, documentation, examples, connections)
@@ -187,7 +190,7 @@ The long-context engine integrates seamlessly:
 
 1. **Same model client** as variation stage
 2. **Same output format** as other variation engines
-3. **No pipeline changes** except adding `enable_long_context` flag
+3. **Enabled via `--use-axes`** — include `long_context` or use `all`
 4. **Runs after generic variations**, before combination generation
 
 Order of execution:
@@ -285,10 +288,10 @@ USER_QUERY: Which indexes exist in DWY1?
 
 ## Files
 
-- `long_context_variation_engine.py` - Main engine implementation
-- `comprehensive_variation_engine_v2.py` - Integration point
-- `complete_variation_pipeline.py` - Pipeline integration
-- `unified_batched_pipeline.py` - CLI flag handling
+- `src/benchdrift/pipeline/long_context_variation_engine.py` — Main engine implementation
+- `src/benchdrift/pipeline/comprehensive_variation_engine_v2.py` — Integration point
+- `src/benchdrift/pipeline/complete_variation_pipeline.py` — Pipeline integration
+- `src/benchdrift/pipeline/unified_batched_pipeline_semantic.py` — CLI flag handling
 
 ## Future Extensions
 

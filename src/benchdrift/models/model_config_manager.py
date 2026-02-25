@@ -37,7 +37,7 @@ class ModelConfigManager:
     def _get_default_config(self) -> Dict:
         """Get default configuration"""
         return {
-            'default_client_preference': ['rits', 'vllm', 'gemini'],
+            'default_client_preference': ['rits', 'ollama', 'vllm', 'gemini'],
             'model_client_mapping': {
                 'granite-3-1-8b': 'rits',
                 'granite-3-0-8b': 'rits', 
@@ -87,6 +87,13 @@ class ModelConfigManager:
                     'trust_remote_code': True,
                     'default_temperature': 0.1,
                     'default_max_tokens': 1000
+                },
+                'ollama': {
+                    'max_workers': 4,
+                    'max_retries': 3,
+                    'timeout': 120,
+                    'default_temperature': 0.1,
+                    'default_max_tokens': 1000
                 }
             }
         }
@@ -100,10 +107,13 @@ class ModelConfigManager:
         
         # Check if model name contains hints
         model_lower = model_name.lower()
-        if any(hint in model_lower for hint in ['granite', 'phi', 'llama', 'franconia']):
+        # Ollama models use colon-based names (e.g., qwen2.5:7b, phi3:latest, llama3:8b)
+        if ':' in model_name and '/' not in model_name:
+            return 'ollama'
+        elif any(hint in model_lower for hint in ['granite', 'phi', 'llama', 'franconia']):
             return 'rits'
         elif 'microsoft/' in model_name or 'meta-llama/' in model_name or '/' in model_name:
-            return 'vllm'  
+            return 'vllm'
         elif 'gemini' in model_lower:
             return 'gemini'
             

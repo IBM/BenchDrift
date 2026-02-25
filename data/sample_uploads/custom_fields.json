@@ -1,0 +1,14 @@
+[
+  {
+    "input": "A train travels at 60 mph for 2 hours, then at 80 mph for 1.5 hours. What is the total distance traveled?",
+    "target": "240"
+  },
+  {
+    "input": "If a rectangle has a perimeter of 30 cm and a width of 5 cm, what is its length?",
+    "target": "10"
+  },
+  {
+    "input": "A shop sold 250 items on Monday and 180 on Tuesday. What percentage decrease is this?",
+    "target": "28"
+  }
+]

@@ -716,18 +716,20 @@ Generate ONE complete problem variation that:
 
     def _batch_validate_all_variations(self, problems_with_variations: List[Tuple[str, List[Dict]]], batch_size: int = 50) -> Dict[int, List[int]]:
         """
-        Batch validate ALL variations across ALL problems with chunking.
+        Batch validate ALL variations across ALL problems with TRUE cross-problem batching.
+
+        Sends batch_size prompts at once to VLLM (like Stage 1), not one combined prompt.
 
         Args:
             problems_with_variations: List of (problem_text, variations_list) tuples
-            batch_size: Maximum variations per API call (default: 50, same as llm_judge)
+            batch_size: Number of validation prompts to send to LLM at once (default: 50)
 
         Returns:
             Dict mapping problem_idx -> list of invalid variation indices
         """
         # Flatten all variations for batch validation
         all_variations = []
-        variation_mapping = []  # (problem_idx, var_idx_in_problem, variation)
+        variation_mapping = []  # (problem_idx, var_idx_in_problem, problem_text)
 
         for problem_idx, (problem_text, variations) in enumerate(problems_with_variations):
             for var_idx, variation in enumerate(variations):
@@ -742,116 +744,83 @@ Generate ONE complete problem variation that:
 
         logger.debug(f"\n🔍 GLOBAL VALIDATION: Validating {total_variations} variations across {len(problems_with_variations)} problems...")
         logger.debug(f"   Batch size: {batch_size}, Total batches: {total_batches}")
+        logger.debug(f"   🚀 Using TRUE cross-problem batching (sending {batch_size} prompts per LLM call)")
 
-        # System prompt (same for all batches)
-        system_prompt = """You are an expert at validating whether problem variations preserve the original intent and answer.
+        # System prompt for individual validation (shorter, for single variation)
+        system_prompt = """You validate if a problem variation preserves the original answer.
 
-Your task: For each variation, determine if it has the EXACT SAME numerical answer as the original problem.
+RULES:
+- VALID: Variation has EXACT same numerical answer as original
+- INVALID: Any numerical value changed to non-equivalent amount
 
-CRITICAL: VERIFY unit conversions are mathematically correct by CALCULATING the conversion:
+Check unit conversions carefully:
+✓ "30 min" → "1800 sec" (30×60=1800) = VALID
+✗ "30 min" → "45 min" = INVALID
 
-DURATION CONVERSIONS (calculate before validating):
-✓ "30 minutes" → "1800 seconds" = VALID (30×60=1800 ✓)
-✓ "45 minutes" → "three quarters of an hour" = VALID (45 = 60×0.75 ✓)
-✗ "30 minutes" → "three quarters of an hour" = INVALID (30 ≠ 60×0.75=45 ✗)
-✗ "45 minutes" → "half an hour" = INVALID (45 ≠ 60×0.5=30 ✗)
+Respond with ONLY one word: VALID or INVALID"""
 
-TIME POINT CONVERSIONS (calculate before validating):
-✓ "2:00 PM" → "840 minutes past midnight" = VALID (14:00, 14×60=840 ✓)
-✓ "9:00 AM" → "540 minutes past midnight" = VALID (9×60=540 ✓)
-✗ "2:00 PM" → "1200 minutes past midnight" = INVALID (14×60=840 ≠ 1200 ✗, 1200÷60=20:00=8PM)
-✗ "9:00 AM" → "600 minutes past midnight" = INVALID (9×60=540 ≠ 600 ✗)
-
-OTHER INVALID CHANGES:
-✗ "8:00 AM" → "noon" = INVALID (8:00 AM ≠ 12:00 PM)
-✗ "2 hours" → "3 hours" = INVALID (2 ≠ 3)
-✗ "5 apples" → "10 apples" = INVALID (5 ≠ 10)
-
-VALIDATION PROCESS:
-1. Identify each numerical value in both original and variation
-2. For conversions, CALCULATE if they're equivalent (don't guess!)
-3. Mark INVALID if ANY value changes to a non-equivalent amount
-
-BE STRICT: If you cannot verify a conversion is correct, mark as INVALID."""
-
-        # Use variation model for validation (not judge model to avoid dual client initialization)
+        # Use variation model for validation
         model_client = self.model_client
         logger.debug(f"   📋 Using variation model for validation...")
 
-        # Process in batches (same pattern as llm_judge_answer_checker.py)
+        # Build ALL prompts upfront (like Stage 1 does)
+        all_system_prompts = []
+        all_user_prompts = []
+
+        for variation, (problem_idx, var_idx, problem_text) in zip(all_variations, variation_mapping):
+            orig_text = str(problem_text) if problem_text else "N/A"
+            var_text = str(variation.get('modified_problem', '')) if variation.get('modified_problem') else "N/A"
+
+            user_prompt = f"""Original: {orig_text}
+
+Variation: {var_text}
+
+Is this variation VALID (same answer) or INVALID (different answer)?"""
+
+            all_system_prompts.append(system_prompt)
+            all_user_prompts.append(user_prompt)
+
+        logger.debug(f"   📝 Built {len(all_user_prompts)} validation prompts")
+
+        # Process in batches - sending batch_size prompts at once to VLLM
         invalid_by_problem = {}
+        all_responses = []
 
         try:
-            validation_range = range(0, total_variations, batch_size)
-            if not getattr(self.model_client, 'verbose', False):
-                validation_range = tqdm(validation_range, desc='Validating', unit='batch')
-            for batch_idx in validation_range:
-                batch_num = batch_idx // batch_size + 1
-                logger.debug(f"   🔄 Processing validation batch {batch_num}/{total_batches} ({min(batch_size, total_variations - batch_idx)} variations)...")
+            if hasattr(model_client, 'get_model_response'):
+                # TRUE batching - send batch_size prompts at once
+                for chunk_start in tqdm(range(0, total_variations, batch_size), desc='Validating', unit='batch'):
+                    chunk_end = min(chunk_start + batch_size, total_variations)
+                    chunk_sys = all_system_prompts[chunk_start:chunk_end]
+                    chunk_user = all_user_prompts[chunk_start:chunk_end]
 
-                # Get batch
-                batch_variations = all_variations[batch_idx:batch_idx + batch_size]
-                batch_mapping = variation_mapping[batch_idx:batch_idx + batch_size]
+                    chunk_responses = model_client.get_model_response(chunk_sys, chunk_user)
+                    all_responses.extend(chunk_responses)
+            else:
+                # Fallback for non-batching clients
+                for i in tqdm(range(total_variations), desc='Validating', unit='var'):
+                    response = str(model_client.generate(all_user_prompts[i], all_system_prompts[i]))
+                    all_responses.append(response)
 
-                # Build user prompt for this batch
-                user_prompt_parts = []
-                for i, (variation, (problem_idx, var_idx, problem_text)) in enumerate(zip(batch_variations, batch_mapping)):
-                    # Show FULL text - validator needs to see all numbers to validate properly
-                    orig_text = str(problem_text) if problem_text else "N/A"
-                    var_text = str(variation.get('modified_problem', '')) if variation.get('modified_problem') else "N/A"
-                    user_prompt_parts.append(f"""
-{i+1}. Original: {orig_text}
-   Variation: {var_text}""")
-
-                user_prompt = f"""Validate these {len(batch_variations)} variations:
-{"".join(user_prompt_parts)}
-
-For EACH variation (1 to {len(batch_variations)}), respond EXACTLY as:
-1: VALID or INVALID
-2: VALID or INVALID
-...
-
-BE STRICT: Any numerical value change means INVALID."""
-
-                # Standard calling pattern (same as everywhere else)
-                if hasattr(model_client, 'get_model_response'):
-                    responses = model_client.get_model_response([system_prompt], [user_prompt])
-                    response = responses[0] if responses else ""
-                else:
-                    response = str(model_client.generate(user_prompt, system_prompt))
-
-                # Parse validation flags for this batch
-                response_lines = str(response).strip().split('\n')
-
-                for i, (variation, (problem_idx, var_idx, problem_text)) in enumerate(zip(batch_variations, batch_mapping)):
-                    # Look for line starting with "i+1:"
-                    found = False
-                    for line in response_lines:
-                        if line.strip().upper().startswith(f"{i+1}:"):
-                            found = True
-                            if 'INVALID' in line.upper():
-                                if problem_idx not in invalid_by_problem:
-                                    invalid_by_problem[problem_idx] = []
-                                invalid_by_problem[problem_idx].append(var_idx)
-                            break
-
-                    if not found:
-                        # Could not parse - mark as invalid for safety
-                        if problem_idx not in invalid_by_problem:
-                            invalid_by_problem[problem_idx] = []
-                        invalid_by_problem[problem_idx].append(var_idx)
+            # Parse responses
+            for i, (response, (problem_idx, var_idx, _)) in enumerate(zip(all_responses, variation_mapping)):
+                response_upper = str(response).upper().strip()
+                # Check if INVALID appears in response
+                if 'INVALID' in response_upper:
+                    if problem_idx not in invalid_by_problem:
+                        invalid_by_problem[problem_idx] = []
+                    invalid_by_problem[problem_idx].append(var_idx)
 
             total_invalid = sum(len(v) for v in invalid_by_problem.values())
-            logger.debug(f"   ✅ Global validation complete: {total_invalid}/{len(all_variations)} variations need correction")
+            logger.debug(f"   ✅ Global validation complete: {total_invalid}/{len(all_variations)} variations marked invalid")
 
             return invalid_by_problem
 
         except Exception as e:
             import traceback
-            logger.debug(f"   ⚠️  Global validation failed: {e}")
-            logger.debug(f"   Error type: {type(e).__name__}")
-            if hasattr(e, '__traceback__'):
-                logger.debug(f"   Traceback: {traceback.format_exc()[:200]}")
+            print(f"   ⚠️  Global validation failed: {e}")
+            print(f"   Error type: {type(e).__name__}")
+            traceback.print_exc()
             logger.debug(f"   Skipping validation - all variations treated as valid")
             return {}
 
@@ -2807,17 +2776,17 @@ STRUCTURAL LINGUISTIC PATTERNS:
             Dict of transformation types with their prompts, capabilities, and examples
         """
         transformation_types = {
-            'counterfactual': {
-                'prompt': """Create a counterfactual version by changing the scenario context while keeping the exact same numerical values and mathematical relationships to preserve the identical answer. Transform objects, people, or situations but maintain all numbers, measurements, and calculations exactly as they are. The mathematical operation and final answer must remain unchanged.
+            'hypothetical_framing': {
+                'prompt': """Reframe this problem using hypothetical language (e.g., "what if", "suppose", "imagine") while keeping ALL conditions, numbers, entities, and relationships identical. Only change the framing — do NOT change any conditions. The answer must remain exactly the same.
 
 Examples:
-- "15 + 25" → "If you had 15 apples and received 25 more apples, how many would you have?"
-- "Rectangle 8cm × 5cm area" → "A garden plot 8 meters × 5 meters, what's the area?"
-- "Train 60 mph for 2.5 hours" → "If a car drives 60 mph for 2.5 hours, how far?"
+- "A rectangle has length 15 and width 20. What is its area?" → "Suppose you have a rectangle with length 15 and width 20. What would its area be?"
+- "John has 12 apples and gives 4 to Mary. How many does he have left?" → "What if John had 12 apples and gave 4 to Mary? How many would he have left?"
+- "A train travels 60 mph for 2.5 hours. How far does it go?" → "Imagine a train traveling at 60 mph for 2.5 hours. How far would it go?"
 
 Your output should be ONLY the transformed problem, nothing else.""",
                 'capability': 'context_preservation',
-                'examples': ["Different object with same dimensions", "Different situation with same numbers", "Alternative context with identical measurements"]
+                'examples': ["Same problem with what-if framing", "Same problem with suppose framing", "Same problem with imagine framing"]
             },
             'interrogative_expansion': {
                 'prompt': """Expand into a detailed multi-part question format while maintaining the same core calculation. Break down the problem into sequential questions that guide through the solution process. Include questions about methodology, intermediate steps, and final calculation. The expanded version should test understanding of the underlying process while keeping the same mathematical content.
@@ -3235,6 +3204,83 @@ Your output should be ONLY the musician-framed problem, nothing else.""",
                 'capability': 'persona_sensitivity_musical',
                 'examples': ["Musical terminology", "Rhythm concepts", "Performance measurement"]
             },
+            'verification_task': {
+                'prompt': """Give the answer to the problem, then ask the model to verify whether that answer is correct. The model must check the provided answer against the original problem. The provided answer MUST be the correct one so the expected verification is "yes, it is correct."
+
+Examples:
+- "What is 15 + 25?" → "Someone claims that 15 + 25 = 40. Is this correct? Verify by computing 15 + 25."
+- "Rectangle 8cm × 5cm area" → "A student says the area of a rectangle with length 8cm and width 5cm is 40 cm². Is the student correct?"
+- "60 mph for 2.5 hours" → "It is claimed that traveling at 60 mph for 2.5 hours covers 150 miles. Verify this claim."
+
+Your output should be ONLY the verification-style problem, nothing else.""",
+                'capability': 'verification_reasoning',
+                'examples': ["Verify that X = Y", "Is this claim correct?", "Check whether the answer is Z"]
+            },
+            'reverse_problem_formulation': {
+                'prompt': """Provide the original answer and ask for a missing input instead. Reverse the problem so the solver must find an input quantity given the output. The numerical answer to the reversed problem should be one of the original input values.
+
+Examples:
+- "What is 15 + 25?" → "Two numbers sum to 40. One of them is 15. What is the other number?" (answer: 25)
+- "Rectangle 8cm × 5cm area" → "A rectangle has area 40 cm² and length 8cm. What is the width?" (answer: 5)
+- "60 mph for 2.5 hours distance" → "A car traveled 150 miles in 2.5 hours. What was its speed in mph?" (answer: 60)
+
+CRITICAL: The reversed problem MUST have a unique, deterministic answer that equals one of the original inputs.
+
+Your output should be ONLY the reverse-formulated problem, nothing else.""",
+                'capability': 'inverse_reasoning',
+                'examples': ["Given output, find input", "What value produces this result?"]
+            },
+            'politeness_variation': {
+                'prompt': """Vary the register from a direct command to a polite request (or vice versa). Change the social tone — add "please", "could you", "would you mind", or conversely strip politeness to a blunt command. Keep ALL mathematical content, numbers, and relationships identical.
+
+Examples:
+- "What is 15 + 25?" → "Could you please calculate 15 + 25 for me?"
+- "Calculate the area of a rectangle 8cm × 5cm" → "I'd really appreciate it if you could find the area of a rectangle measuring 8cm by 5cm."
+- "Find the distance: 60 mph for 2.5 hours" → "Would you mind determining how far one travels at 60 mph over 2.5 hours? Thank you!"
+
+Your output should be ONLY the politeness-varied problem, nothing else.""",
+                'capability': 'register_sensitivity',
+                'examples': ["Polite request form", "Blunt command form", "Formal request"]
+            },
+            'uncertainty_markers': {
+                'prompt': """Add uncertainty language like "approximately", "around", "roughly", "about", "maybe" to the problem while keeping ALL exact numbers unchanged. The markers should suggest imprecision but the actual values stay exact, so the expected answer remains the same.
+
+Examples:
+- "What is 15 + 25?" → "If you have roughly 15 items and someone gives you about 25 more, approximately how many items do you have?"
+- "Rectangle 8cm × 5cm area" → "A rectangle measures approximately 8cm in length and around 5cm in width. What is the area, roughly speaking?"
+- "60 mph for 2.5 hours" → "A car goes at about 60 mph for approximately 2.5 hours. Roughly how far does it travel?"
+
+CRITICAL: The exact numerical answer must remain the same — only the LANGUAGE suggests uncertainty, not the actual values.
+
+Your output should be ONLY the uncertainty-marked problem, nothing else.""",
+                'capability': 'uncertainty_language_robustness',
+                'examples': ["Approximately X", "Roughly Y", "About Z"]
+            },
+            'causal_framing': {
+                'prompt': """Reframe the problem as an explicit cause→effect chain. Make causal relationships explicit using "because", "therefore", "as a result", "this causes", etc. The mathematical content and answer must remain identical.
+
+Examples:
+- "15 + 25" → "Because you started with 15 items, and because you then received 25 more, what is the resulting total?"
+- "Rectangle 8cm × 5cm area" → "A rectangle has a length of 8cm, which causes its total area to depend on its width of 5cm. As a result, what is the area?"
+- "60 mph for 2.5 hours" → "Because the car maintains a speed of 60 mph, and because it travels for 2.5 hours, what distance results from this journey?"
+
+Your output should be ONLY the causally framed problem, nothing else.""",
+                'capability': 'causal_reasoning',
+                'examples': ["Because X, therefore Y", "This causes...", "As a result..."]
+            },
+            'passive_active_voice': {
+                'prompt': """Convert between passive and active voice. If the original uses active voice, convert to passive; if passive, convert to active. Keep ALL mathematical content, numbers, and relationships identical.
+
+Examples:
+- Active → Passive: "John eats 3 eggs for breakfast" → "3 eggs are eaten by John for breakfast"
+- Active → Passive: "She sells 9 duck eggs at $2 each" → "9 duck eggs are sold by her at $2 each"
+- Passive → Active: "16 eggs are laid by the ducks each day" → "The ducks lay 16 eggs each day"
+- Active → Passive: "A train travels 60 mph for 2.5 hours" → "A speed of 60 mph is maintained by a train for 2.5 hours"
+
+Your output should be ONLY the voice-converted problem, nothing else.""",
+                'capability': 'voice_sensitivity',
+                'examples': ["Passive construction", "Active construction", "Voice conversion"]
+            },
             'missing_context': {
                 'prompt': """Analyze if the problem is missing any essential context or information needed for complete understanding. If missing context exists, add it while preserving the original intent and answer. If NO context is missing (problem is already complete), return SKIP.
 
@@ -3300,6 +3346,203 @@ Examples:
 Your output should be ONLY the programming formulation, nothing else.""",
                 'capability': 'code_formulation',
                 'examples': ["Function implementation", "Algorithmic challenge", "Code specification"]
+            },
+            # ── Enumeration / skeleton format transformations ──
+            'enumeration_format_variation': {
+                'prompt': """Change ONLY the enumeration style of any listed items, options, or choices in the problem. If options are labeled A) B) C) D), change to 1) 2) 3) 4) or (a) (b) (c) (d) or i. ii. iii. iv. or bullet points. If items use numbered lists, switch to lettered or bulleted. The actual content, order, and mathematical answer must remain IDENTICAL — only the labeling format changes.
+
+If the problem has NO enumerated items, options, or lists, return SKIP.
+
+Examples:
+- "A) 42  B) 56  C) 64  D) 72" → "1) 42  2) 56  3) 64  4) 72"
+- "A) 42  B) 56  C) 64  D) 72" → "(a) 42  (b) 56  (c) 64  (d) 72"
+- "1. Cut the wood  2. Sand it  3. Paint it" → "a) Cut the wood  b) Sand it  c) Paint it"
+- "- apples  - bananas  - oranges" → "1. apples  2. bananas  3. oranges"
+- "(A) True  (B) False" → "i) True  ii) False"
+
+Your output should be ONLY the problem with changed enumeration format, or SKIP if no enumeration exists.""",
+                'capability': 'enumeration_sensitivity',
+                'examples': ["A/B/C/D → 1/2/3/4", "Numbered → lettered", "Bullets → numbered"]
+            },
+            'option_delimiter_variation': {
+                'prompt': """Change ONLY the delimiters and separators used for options or list items in the problem. Change how options are separated (newlines vs inline, parentheses vs dots vs colons, spaces vs tabs). The content, order, labels, and answer must remain IDENTICAL — only the visual separation changes.
+
+If the problem has NO options or list items, return SKIP.
+
+Examples:
+- Options on separate lines:
+  "A) 42
+   B) 56
+   C) 64" → Options inline: "A) 42,  B) 56,  C) 64"
+- "A. 42  B. 56  C. 64" → "A: 42 | B: 56 | C: 64"
+- "(A) 42; (B) 56; (C) 64" → "A) 42  B) 56  C) 64"
+- Inline options → each on its own line
+
+Your output should be ONLY the problem with changed delimiters, or SKIP if no options/lists exist.""",
+                'capability': 'delimiter_sensitivity',
+                'examples': ["Newline → inline", "Dots → colons", "Semicolons → newlines"]
+            },
+            'option_order_shuffle': {
+                'prompt': """Shuffle the ORDER of multiple-choice options or listed items while keeping the correct answer the same. The labels should be re-assigned to match the new order (so the content that was under A is now under a different letter). The question text and the CORRECT answer content remain the same — only the position of options changes.
+
+If the problem has NO multiple-choice options or ordered items where shuffling is meaningful, return SKIP.
+
+Examples:
+- Original: "A) 42  B) 56  C) 64  D) 72" (correct: A) → Shuffled: "A) 64  B) 72  C) 42  D) 56" (correct: C)
+- Original: "A) Paris  B) London  C) Berlin  D) Rome" (correct: A) → "A) Berlin  B) Paris  C) Rome  D) London" (correct: B)
+
+CRITICAL: The content of the correct option must appear somewhere in the shuffled list. Do NOT change the content of any option.
+
+Your output should be ONLY the problem with shuffled options, or SKIP if no options exist.""",
+                'capability': 'option_order_sensitivity',
+                'examples': ["Shuffle MCQ order", "Reorder choices", "Permute options"]
+            },
+            # ── Long-context structural transformations ──
+            'long_context.format.quotes': {
+                'prompt': """Change the quote style throughout the problem. Convert single quotes to double quotes or vice versa. Convert straight quotes to curly quotes or vice versa. Keep ALL content identical — only change the quotation mark characters.
+
+Examples:
+- 'value' → "value"
+- "result" → 'result'
+- "She said 'hello'" → 'She said "hello"'
+
+Your output should be ONLY the problem with changed quote styles, nothing else.""",
+                'capability': 'format_robustness',
+                'examples': ["Single → double quotes", "Double → single quotes"]
+            },
+            'long_context.format.whitespace': {
+                'prompt': """Vary the whitespace in the problem. Add or remove extra blank lines between paragraphs, change single spaces to double spaces around operators or punctuation, normalize or add inconsistent spacing. Keep ALL textual content identical — only change whitespace characters.
+
+Examples:
+- "A + B = C" → "A  +  B  =  C"
+- Paragraph1\\n\\nParagraph2 → Paragraph1\\nParagraph2
+- Compact text → text with extra line breaks between sections
+
+Your output should be ONLY the problem with varied whitespace, nothing else.""",
+                'capability': 'format_robustness',
+                'examples': ["Add extra spaces", "Remove blank lines", "Normalize whitespace"]
+            },
+            'long_context.format.case': {
+                'prompt': """Change the case of any headers, labels, or section titles in the problem. Convert uppercase headers to lowercase or title case, or vice versa. Do NOT change the case of proper nouns, variable names, or mathematical content — only structural labels and headers.
+
+Examples:
+- "QUESTION:" → "Question:" or "question:"
+- "Given Information:" → "GIVEN INFORMATION:"
+- "Step 1:" → "STEP 1:"
+
+If there are no headers or labels, change the case style of the opening word or sentence. Keep ALL mathematical content identical.
+
+Your output should be ONLY the problem with changed case styling, nothing else.""",
+                'capability': 'format_robustness',
+                'examples': ["UPPERCASE → Title Case", "lowercase → UPPERCASE"]
+            },
+            'long_context.positioning.sections': {
+                'prompt': """Rearrange the order of distinct sections or information blocks in the problem while keeping ALL content identical. Move background info before or after the question, swap the order of given conditions, or move examples to a different position. The mathematical content and answer must remain the same.
+
+Examples:
+- "Given: X=5, Y=10. Background: This is a physics problem. Question: Find Z." → "Background: This is a physics problem. Given: X=5, Y=10. Question: Find Z."
+- Move the question to the beginning instead of the end
+- Move constraints before or after the main setup
+
+Your output should be ONLY the problem with rearranged sections, nothing else.""",
+                'capability': 'position_sensitivity',
+                'examples': ["Move question first", "Swap given/background", "Reorder sections"]
+            },
+            'long_context.positioning.paragraphs': {
+                'prompt': """Reverse or rearrange the order of paragraphs in the problem. If the problem has multiple paragraphs or sentence groups providing different pieces of information, shuffle their order while keeping ALL content and the mathematical answer identical.
+
+Examples:
+- "Paragraph about costs. Paragraph about quantities. Question." → "Paragraph about quantities. Paragraph about costs. Question."
+- Swap the order of two information-giving paragraphs
+
+If the problem is a single paragraph, split it into logical chunks and rearrange them.
+
+Your output should be ONLY the problem with rearranged paragraphs, nothing else.""",
+                'capability': 'position_sensitivity',
+                'examples': ["Reverse paragraph order", "Shuffle info blocks"]
+            },
+            'long_context.content.removal': {
+                'prompt': """Remove redundant or non-essential content from the problem while keeping ALL information needed to solve it. Strip unnecessary background, verbose explanations, or repeated information. The core mathematical content and answer must remain identical.
+
+Examples:
+- "In the beautiful city of Paris, which is known for its art and culture, a baker who has been working for 20 years makes 15 croissants per hour." → "A baker makes 15 croissants per hour."
+- Remove filler phrases like "As we know", "It is worth noting", etc.
+
+CRITICAL: Do NOT remove any number, condition, or relationship needed to compute the answer.
+
+Your output should be ONLY the trimmed problem, nothing else.""",
+                'capability': 'noise_robustness',
+                'examples': ["Remove background fluff", "Strip redundancy", "Minimize to essentials"]
+            },
+            'long_context.quality.clarity': {
+                'prompt': """Improve the clarity of the problem with minimal changes while preserving ALL facts, numbers, and the expected answer. Fix ambiguous pronoun references, clarify unclear relationships, or make implicit information explicit. Do NOT add new information — only make existing information clearer.
+
+Examples:
+- "He gave them to her" → "John gave the 5 apples to Mary"
+- "The first one is bigger" → "The first rectangle has a larger area"
+
+Your output should be ONLY the clarified problem, nothing else.""",
+                'capability': 'clarity_sensitivity',
+                'examples': ["Resolve pronouns", "Clarify references", "Make implicit explicit"]
+            },
+            'long_context.quality.completeness': {
+                'prompt': """Add implied but unstated information that helps understanding, while keeping the mathematical content and answer identical. Fill in context that a reader would reasonably infer but isn't explicitly stated.
+
+Examples:
+- "A rectangle is 8cm by 5cm. Find the area." → "A rectangle has a length of 8cm and a width of 5cm. Find the area in square centimeters."
+- "60 mph for 2.5 hours" → "A car travels at a constant speed of 60 miles per hour for a duration of 2.5 hours along a straight road"
+
+CRITICAL: Added information must be consistent with the original problem. Do NOT change any given values.
+
+Your output should be ONLY the completed problem, nothing else.""",
+                'capability': 'completeness_sensitivity',
+                'examples': ["Add implied units", "Spell out assumptions", "Expand abbreviations"]
+            },
+            'long_context.quality.ambiguity': {
+                'prompt': """Resolve ambiguous references in the problem. Replace pronouns with explicit nouns, clarify which entity a modifier refers to, and resolve any "it", "they", "this", "that" to specific referents. Keep ALL mathematical content and the answer identical.
+
+Examples:
+- "John and Mary split it evenly" → "John and Mary split the $100 prize evenly"
+- "She gave him some and they shared the rest" → "Mary gave John 5 apples and they shared the remaining 10 apples"
+
+If there are no ambiguous references, return SKIP.
+
+Your output should be ONLY the disambiguated problem, or SKIP if no ambiguity exists.""",
+                'capability': 'ambiguity_sensitivity',
+                'examples': ["Resolve pronouns", "Clarify 'it'/'they'", "SKIP if unambiguous"]
+            },
+            'long_context.style.redundancy': {
+                'prompt': """Add controlled redundancy to the problem by restating key information in different words, or by summarizing what was said. This tests whether extra repetition confuses the model. Keep ALL mathematical content and the answer identical.
+
+Examples:
+- "A rectangle is 8cm by 5cm" → "A rectangle is 8cm by 5cm. That is, the length measures 8 centimeters and the width measures 5 centimeters."
+- "Speed is 60 mph for 2.5 hours" → "The speed is 60 mph. Traveling at this rate of sixty miles per hour for 2.5 hours..."
+
+Your output should be ONLY the problem with added redundancy, nothing else.""",
+                'capability': 'redundancy_robustness',
+                'examples': ["Restate key facts", "Add summary sentence", "Echo values"]
+            },
+            'long_context.style.formality': {
+                'prompt': """Change the formality level of the problem. If informal, make it formal and academic. If formal, make it casual and conversational. Keep ALL mathematical content, numbers, and the answer identical.
+
+Examples:
+- Informal → Formal: "So you've got 15 apples and you give away 5, how many you got left?" → "Given an initial quantity of 15 apples, if 5 are distributed, determine the remaining quantity."
+- Formal → Informal: "Calculate the sum of 15 and 25." → "Hey, what do you get when you add 15 and 25?"
+
+Your output should be ONLY the formality-varied problem, nothing else.""",
+                'capability': 'formality_sensitivity',
+                'examples': ["Casual → academic", "Formal → conversational"]
+            },
+            'long_context.style.complexity': {
+                'prompt': """Change the sentence complexity of the problem. If it uses simple sentences, combine them into complex sentences with subordinate clauses. If it uses complex sentences, break them into simple, short sentences. Keep ALL mathematical content and the answer identical.
+
+Examples:
+- Simple → Complex: "A train goes 60 mph. It travels for 2.5 hours. How far does it go?" → "A train, which travels at a speed of 60 mph for a duration of 2.5 hours, covers what distance?"
+- Complex → Simple: "Given that a rectangle whose length is 8cm has a width of 5cm, calculate its area." → "A rectangle has length 8cm. Its width is 5cm. What is the area?"
+
+Your output should be ONLY the complexity-varied problem, nothing else.""",
+                'capability': 'complexity_sensitivity',
+                'examples': ["Simple → compound sentences", "Complex → short sentences"]
             }
         }
 

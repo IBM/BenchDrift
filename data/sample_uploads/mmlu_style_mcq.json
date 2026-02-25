@@ -1,0 +1,17 @@
+[
+  {
+    "question": "What is the primary function of mitochondria in a cell?",
+    "choices": ["Protein synthesis", "Energy production", "DNA replication", "Cell division"],
+    "answer": "B"
+  },
+  {
+    "question": "Which of the following is NOT a characteristic of a monopoly?",
+    "choices": ["Single seller", "Price maker", "Free entry and exit", "Unique product"],
+    "answer": "C"
+  },
+  {
+    "question": "In which layer of the OSI model does TCP operate?",
+    "choices": ["Network", "Transport", "Session", "Data Link"],
+    "answer": "B"
+  }
+]

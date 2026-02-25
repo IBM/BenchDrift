@@ -107,7 +107,8 @@ class SemanticCompositeDetector:
         self.logger.debug(f"   Embedding model: {embedding_model}")
         self.logger.debug(f"   Clustering threshold: {semantic_threshold}")
 
-        self.embedder = SentenceTransformer(embedding_model)
+        # Force CPU to avoid GPU memory conflicts with VLLM
+        self.embedder = SentenceTransformer(embedding_model, device='cpu')
         self.semantic_threshold = semantic_threshold
 
     def detect_clusters(

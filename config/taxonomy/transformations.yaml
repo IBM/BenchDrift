@@ -1,0 +1,834 @@
+# BenchDrift Transformation Taxonomy v2
+# Comprehensive index of all transformations for relevance-based selection
+#
+# Structure:
+#   - Each transformation has metadata for semantic search and filtering
+#   - Prompts use {placeholders} for dynamic content
+#   - Embeddings will be pre-computed from description + examples
+
+version: "2.0"
+last_updated: "2025-01-11"
+
+# =============================================================================
+# AXIS 1: LINGUISTIC (Surface-form changes preserving meaning)
+# =============================================================================
+axes:
+  linguistic:
+    description: "Surface-form changes that preserve exact meaning through rephrasing"
+    transformations:
+
+      # --- Generic Transformations ---
+      hypothetical_framing:
+        name: "Hypothetical Framing"
+        category: "generic"
+        description: "Reframe the problem as a hypothetical scenario using 'what if' or 'suppose' language while preserving all conditions and the exact same answer"
+        type: "llm"
+        applicable_domains: ["general", "math", "reasoning"]
+        required_features: []
+        examples:
+          - before: "A rectangle has length 15 and width 20. What is its area?"
+            after: "Suppose you have a rectangle with length 15 and width 20. What would its area be?"
+          - before: "John has 12 apples and gives 4 to Mary. How many does he have left?"
+            after: "What if John had 12 apples and gave 4 to Mary? How many would he have left?"
+        system_prompt: |
+          You are an expert at generating equivalent problem variations that preserve the exact same answer and mathematical requirements.
+
+          VARIATION TYPE: hypothetical_framing
+          DESCRIPTION: Reframe the problem using hypothetical language ("what if", "suppose", "imagine") while keeping ALL conditions, numbers, and relationships identical.
+
+          CRITICAL CONSTRAINTS:
+          1. MUST preserve the exact same numerical answer
+          2. MUST keep all numbers, entities, and conditions unchanged
+          3. ONLY change the framing to hypothetical — do NOT change any conditions
+          4. MUST preserve question intent exactly
+          5. Generate exactly ONE variation
+
+          OUTPUT FORMAT: Respond with ONLY the varied problem text in PLAIN TEXT.
+        user_prompt_template: |
+          Reframe this problem using hypothetical language (e.g., "what if", "suppose") while keeping all conditions and the answer identical:
+
+          {problem}
+
+          Generate one hypothetical framing variation:
+
+      interrogative:
+        name: "Interrogative"
+        category: "generic"
+        description: "Transform statements into questions or change question types"
+        type: "llm"
+        applicable_domains: ["general", "math", "reasoning"]
+        required_features: []
+        examples:
+          - before: "Calculate the area of a rectangle with length 10 and width 5."
+            after: "What is the area when a rectangle has length 10 and width 5?"
+        system_prompt: |
+          You are an expert at generating equivalent problem variations that preserve the exact same answer.
+
+          VARIATION TYPE: interrogative
+          DESCRIPTION: Transform statements into questions or change question types
+          EXAMPLE: Change from "Calculate..." to "What is the area when..."
+
+          CRITICAL CONSTRAINTS:
+          1. MUST preserve the exact same numerical answer
+          2. MUST maintain the same solution method
+          3. Generate exactly ONE variation
+
+          OUTPUT FORMAT: Respond with ONLY the varied problem text in PLAIN TEXT.
+        user_prompt_template: |
+          Transform this problem using the interrogative approach:
+
+          {problem}
+
+          Generate one interrogative variation:
+
+      logical_formulation:
+        name: "Logical Formulation"
+        category: "generic"
+        description: "Express the problem using logical operators and formal reasoning"
+        type: "llm"
+        applicable_domains: ["math", "logic", "reasoning"]
+        required_features: ["has_logical_structure"]
+        examples:
+          - before: "If John has 5 apples and gives away 2, how many remain?"
+            after: "Given P: John has 5 apples, Q: John gives away 2. If P and Q, what is the result?"
+        system_prompt: |
+          You are an expert at generating equivalent problem variations using formal logic.
+
+          VARIATION TYPE: logical_formulation
+          DESCRIPTION: Express the problem using logical operators and formal reasoning
+
+          CRITICAL CONSTRAINTS:
+          1. MUST preserve the exact same answer
+          2. Use logical notation where appropriate
+          3. Generate exactly ONE variation
+
+          OUTPUT FORMAT: Respond with ONLY the varied problem text in PLAIN TEXT.
+        user_prompt_template: |
+          Transform this problem using logical formulation:
+
+          {problem}
+
+          Generate one logical formulation variation:
+
+      symbolic_representation:
+        name: "Symbolic Representation"
+        category: "generic"
+        description: "Use mathematical symbols and formal notation"
+        type: "llm"
+        applicable_domains: ["math"]
+        required_features: ["has_numbers", "has_math_operations"]
+        examples:
+          - before: "Find the area of a rectangle with length 15 and width 20"
+            after: "Express using variables: A = l * w where l=15, w=20. Find A."
+        system_prompt: |
+          You are an expert at generating equivalent problem variations using symbolic notation.
+
+          VARIATION TYPE: symbolic_representation
+          DESCRIPTION: Use mathematical symbols and formal notation
+
+          CRITICAL CONSTRAINTS:
+          1. MUST preserve the exact same answer
+          2. Use variables and mathematical symbols
+          3. Generate exactly ONE variation
+
+          OUTPUT FORMAT: Respond with ONLY the varied problem text in PLAIN TEXT.
+        user_prompt_template: |
+          Transform this problem using symbolic representation:
+
+          {problem}
+
+          Generate one symbolic variation:
+
+      narrative_style:
+        name: "Narrative Style"
+        category: "generic"
+        description: "Transform into a story-like narrative with characters and context"
+        type: "llm"
+        applicable_domains: ["general", "math"]
+        required_features: []
+        examples:
+          - before: "Calculate 15 + 25"
+            after: "Sarah found 15 seashells on Monday and 25 more on Tuesday. How many seashells does she have in total?"
+        system_prompt: |
+          You are an expert at generating equivalent problem variations in narrative form.
+
+          VARIATION TYPE: narrative_style
+          DESCRIPTION: Transform into a story-like narrative with characters and context
+
+          CRITICAL CONSTRAINTS:
+          1. MUST preserve the exact same answer
+          2. Add story elements without changing the math
+          3. Generate exactly ONE variation
+
+          OUTPUT FORMAT: Respond with ONLY the varied problem text in PLAIN TEXT.
+        user_prompt_template: |
+          Transform this problem using narrative style:
+
+          {problem}
+
+          Generate one narrative variation:
+
+      irrelevant_context:
+        name: "Irrelevant Context"
+        category: "generic"
+        description: "Add extra information that does not affect the solution"
+        type: "llm"
+        applicable_domains: ["general", "math", "reasoning"]
+        required_features: []
+        examples:
+          - before: "What is 15 + 25?"
+            after: "On a sunny Tuesday afternoon, what is 15 + 25?"
+        system_prompt: |
+          You are an expert at generating equivalent problem variations with added context.
+
+          VARIATION TYPE: irrelevant_context
+          DESCRIPTION: Add extra information that does not affect the solution
+
+          CRITICAL CONSTRAINTS:
+          1. MUST preserve the exact same answer
+          2. Added context must be irrelevant to solution
+          3. Generate exactly ONE variation
+
+          OUTPUT FORMAT: Respond with ONLY the varied problem text in PLAIN TEXT.
+        user_prompt_template: |
+          Transform this problem by adding irrelevant context:
+
+          {problem}
+
+          Generate one variation with irrelevant context:
+
+      near_transfer:
+        name: "Near Transfer"
+        category: "transfer"
+        description: "Simple, surface-level changes that preserve meaning obviously"
+        type: "llm"
+        applicable_domains: ["general"]
+        required_features: []
+        examples:
+          - before: "John bought 5 apples"
+            after: "John purchased five apples"
+        system_prompt: |
+          You are an expert at generating NEAR TRANSFER variations - simple, surface-level changes that preserve meaning obviously.
+
+          NEAR TRANSFER CHARACTERISTICS:
+          - Simple rephrasing that maintains clear, obvious meaning
+          - Minor word substitutions (synonyms)
+          - Basic format changes
+          - Changes a novice could recognize as equivalent
+
+          CRITICAL: Must preserve exact answer.
+        user_prompt_template: |
+          Generate simple, surface-level variations of this problem:
+
+          {problem}
+
+          Create variations that are obviously equivalent.
+
+      far_transfer:
+        name: "Far Transfer"
+        category: "transfer"
+        description: "Complex, sophisticated changes that test deeper understanding"
+        type: "llm"
+        applicable_domains: ["general"]
+        required_features: []
+        examples:
+          - before: "Calculate 15% of 200"
+            after: "If a store offers a discount that reduces the price by 15 cents for every dollar, how much would you save on a $200 item?"
+        system_prompt: |
+          You are an expert at generating FAR TRANSFER variations - complex, sophisticated changes that test deeper understanding.
+
+          FAR TRANSFER CHARACTERISTICS:
+          - Creative rephrasing with multiple transformations
+          - Domain shifts (word problem to algebraic, etc.)
+          - Complex restructuring
+          - Changes that require expertise to recognize as equivalent
+
+          CRITICAL: Must preserve exact answer.
+        user_prompt_template: |
+          Generate sophisticated, complex variations of this problem:
+
+          {problem}
+
+          Create variations that require deep understanding to recognize as equivalent.
+
+  # =============================================================================
+  # AXIS 2: REFERENTIAL (Entity/value substitutions)
+  # =============================================================================
+  referential:
+    description: "Coordinated substitutions of entities, numbers, dates while preserving semantic relationships"
+    transformations:
+
+      # --- Temporal Transformations ---
+      time_12hr_to_24hr:
+        name: "12-hour to 24-hour Time"
+        category: "temporal"
+        description: "Convert 12-hour time format to 24-hour military time"
+        type: "deterministic"
+        applicable_domains: ["temporal"]
+        required_features: ["has_time_12hr"]
+        examples:
+          - before: "2:00 PM"
+            after: "14:00"
+          - before: "8:00 AM"
+            after: "08:00"
+        transformation_rules:
+          - "Add 12 to PM hours (except 12 PM)"
+          - "12 AM becomes 00:00"
+          - "Remove AM/PM suffix"
+
+      time_24hr_to_12hr:
+        name: "24-hour to 12-hour Time"
+        category: "temporal"
+        description: "Convert 24-hour military time to 12-hour format"
+        type: "deterministic"
+        applicable_domains: ["temporal"]
+        required_features: ["has_time_24hr"]
+        examples:
+          - before: "14:00"
+            after: "2:00 PM"
+          - before: "08:00"
+            after: "8:00 AM"
+        transformation_rules:
+          - "Subtract 12 from hours >= 13"
+          - "00:00 becomes 12:00 AM"
+          - "Add AM/PM suffix"
+
+      duration_unit_conversion:
+        name: "Duration Unit Conversion"
+        category: "temporal"
+        description: "Convert duration between time units (hours, minutes, seconds, days)"
+        type: "deterministic"
+        applicable_domains: ["temporal", "math"]
+        required_features: ["has_duration"]
+        examples:
+          - before: "2 hours"
+            after: "120 minutes"
+          - before: "90 minutes"
+            after: "1.5 hours"
+          - before: "3 days"
+            after: "72 hours"
+        transformation_rules:
+          - "1 hour = 60 minutes = 3600 seconds"
+          - "1 day = 24 hours"
+          - "1 week = 7 days"
+
+      date_format_variation:
+        name: "Date Format Variation"
+        category: "temporal"
+        description: "Change date representation format"
+        type: "deterministic"
+        applicable_domains: ["temporal"]
+        required_features: ["has_date"]
+        examples:
+          - before: "January 15, 2024"
+            after: "15/01/2024"
+          - before: "2024-01-15"
+            after: "Jan 15, 2024"
+        formats:
+          - "YYYY-MM-DD"
+          - "MM/DD/YYYY"
+          - "DD/MM/YYYY"
+          - "Month DD, YYYY"
+          - "DD Month YYYY"
+
+      relative_time_conversion:
+        name: "Relative Time Conversion"
+        category: "temporal"
+        description: "Convert between absolute and relative time references"
+        type: "llm"
+        applicable_domains: ["temporal"]
+        required_features: ["has_temporal_reference"]
+        examples:
+          - before: "in 3 days"
+            after: "on Thursday" # context-dependent
+          - before: "2 hours ago"
+            after: "at 10:00 AM" # context-dependent
+
+      # --- Math Transformations ---
+      fraction_to_decimal:
+        name: "Fraction to Decimal"
+        category: "math"
+        description: "Convert fractions to decimal representation"
+        type: "deterministic"
+        applicable_domains: ["math"]
+        required_features: ["has_fraction"]
+        examples:
+          - before: "3/4"
+            after: "0.75"
+          - before: "1/2"
+            after: "0.5"
+          - before: "2/3"
+            after: "0.667"
+
+      fraction_to_percentage:
+        name: "Fraction to Percentage"
+        category: "math"
+        description: "Convert fractions to percentage representation"
+        type: "deterministic"
+        applicable_domains: ["math"]
+        required_features: ["has_fraction"]
+        examples:
+          - before: "3/4"
+            after: "75%"
+          - before: "1/2"
+            after: "50%"
+
+      decimal_to_fraction:
+        name: "Decimal to Fraction"
+        category: "math"
+        description: "Convert decimals to fraction representation"
+        type: "deterministic"
+        applicable_domains: ["math"]
+        required_features: ["has_decimal"]
+        examples:
+          - before: "0.75"
+            after: "3/4"
+          - before: "0.5"
+            after: "1/2"
+
+      word_to_number:
+        name: "Word to Number"
+        category: "math"
+        description: "Convert number words to digits"
+        type: "deterministic"
+        applicable_domains: ["math", "general"]
+        required_features: ["has_number_words"]
+        examples:
+          - before: "five"
+            after: "5"
+          - before: "twenty-three"
+            after: "23"
+          - before: "one hundred"
+            after: "100"
+
+      number_to_word:
+        name: "Number to Word"
+        category: "math"
+        description: "Convert digits to number words"
+        type: "deterministic"
+        applicable_domains: ["math", "general"]
+        required_features: ["has_numbers"]
+        examples:
+          - before: "5"
+            after: "five"
+          - before: "23"
+            after: "twenty-three"
+
+      unit_conversion:
+        name: "Unit Conversion"
+        category: "math"
+        description: "Convert between measurement units"
+        type: "deterministic"
+        applicable_domains: ["math", "science"]
+        required_features: ["has_units"]
+        examples:
+          - before: "60 miles"
+            after: "96.56 kilometers"
+          - before: "100 kg"
+            after: "220.46 pounds"
+
+      # --- NL Entity Transformations ---
+      entity_substitution:
+        name: "Entity Substitution"
+        category: "nl_entity"
+        description: "Substitute named entities with semantically equivalent alternatives"
+        type: "llm"
+        applicable_domains: ["general"]
+        required_features: ["has_entities"]
+        examples:
+          - before: "John bought apples"
+            after: "Michael purchased apples"
+          - before: "New York City"
+            after: "NYC"
+        system_prompt: |
+          You are an expert at generating sophisticated natural language variations that preserve exact meaning.
+
+          Generate variations by substituting entities (names, places, objects) with semantically equivalent alternatives.
+
+          CRITICAL: The answer must remain exactly the same.
+        user_prompt_template: |
+          Substitute entities in this problem while preserving the answer:
+
+          {problem}
+
+  # =============================================================================
+  # AXIS 3: PRAGMATIC (Perspective/tone shifts)
+  # =============================================================================
+  pragmatic:
+    description: "Changes in tone, formality, and perspective while preserving content"
+    transformations:
+
+      formal_tone:
+        name: "Formal Tone"
+        category: "formality"
+        description: "Rewrite in formal, technical, professional language"
+        type: "llm"
+        applicable_domains: ["general", "long_context"]
+        required_features: []
+        examples:
+          - before: "Figure out how many apples are left"
+            after: "Calculate the remaining quantity of apples"
+        system_prompt: |
+          Rewrite this content in formal, technical style.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Change only style/tone - preserve all facts
+          3. Keep all numerical values unchanged
+        user_prompt_template: |
+          Rewrite in formal, professional language:
+
+          {problem}
+
+      casual_tone:
+        name: "Casual Tone"
+        category: "formality"
+        description: "Rewrite in casual, conversational language"
+        type: "llm"
+        applicable_domains: ["general", "long_context"]
+        required_features: []
+        examples:
+          - before: "Calculate the sum of the following integers"
+            after: "Add up these numbers"
+        system_prompt: |
+          Rewrite this content in casual, conversational style.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Change only style/tone - preserve all facts
+          3. Keep all numerical values unchanged
+        user_prompt_template: |
+          Rewrite in casual, conversational language:
+
+          {problem}
+
+      simplify:
+        name: "Simplify"
+        category: "complexity"
+        description: "Simplify language with easier words and shorter sentences"
+        type: "llm"
+        applicable_domains: ["general", "long_context"]
+        required_features: []
+        examples:
+          - before: "Determine the quotient when 144 is divided by 12"
+            after: "What is 144 divided by 12?"
+        system_prompt: |
+          Simplify this content (easier language, shorter sentences).
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Simplify language - preserve all facts
+          3. Keep all numerical values unchanged
+        user_prompt_template: |
+          Simplify this problem:
+
+          {problem}
+
+      elaborate:
+        name: "Elaborate"
+        category: "complexity"
+        description: "Add more detail and explanation"
+        type: "llm"
+        applicable_domains: ["general", "long_context"]
+        required_features: []
+        examples:
+          - before: "Find 15 + 25"
+            after: "Given two numbers, fifteen and twenty-five, compute their sum to find the total value."
+        system_prompt: |
+          Elaborate this content with more detail.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Add detail - do not change existing facts
+          3. Keep all numerical values unchanged
+        user_prompt_template: |
+          Elaborate this problem with more detail:
+
+          {problem}
+
+  # =============================================================================
+  # AXIS 4: STRUCTURAL (Organization changes)
+  # =============================================================================
+  structural:
+    description: "Changes in format, organization, and information structure"
+    transformations:
+
+      # --- Format Transformations (Deterministic) ---
+      quote_single_to_double:
+        name: "Single to Double Quotes"
+        category: "format"
+        description: "Convert single quotes to double quotes"
+        type: "deterministic"
+        applicable_domains: ["long_context", "code"]
+        required_features: ["has_quotes"]
+        examples:
+          - before: "The 'quick' brown fox"
+            after: 'The "quick" brown fox'
+        function: "text.replace(\"'\", '\"')"
+
+      quote_double_to_single:
+        name: "Double to Single Quotes"
+        category: "format"
+        description: "Convert double quotes to single quotes"
+        type: "deterministic"
+        applicable_domains: ["long_context", "code"]
+        required_features: ["has_quotes"]
+        examples:
+          - before: 'The "quick" brown fox'
+            after: "The 'quick' brown fox"
+        function: "text.replace('\"', \"'\")"
+
+      whitespace_add:
+        name: "Add Extra Whitespace"
+        category: "format"
+        description: "Double all spaces"
+        type: "deterministic"
+        applicable_domains: ["long_context"]
+        required_features: []
+        examples:
+          - before: "Hello world"
+            after: "Hello  world"
+        function: "text.replace(' ', '  ')"
+
+      whitespace_normalize:
+        name: "Normalize Whitespace"
+        category: "format"
+        description: "Normalize to single spaces"
+        type: "deterministic"
+        applicable_domains: ["long_context"]
+        required_features: []
+        examples:
+          - before: "Hello  world"
+            after: "Hello world"
+        function: "' '.join(text.split())"
+
+      case_uppercase_headers:
+        name: "Uppercase Headers"
+        category: "format"
+        description: "Convert section headers to uppercase"
+        type: "deterministic"
+        applicable_domains: ["long_context"]
+        required_features: ["has_headers"]
+        examples:
+          - before: "Introduction:"
+            after: "INTRODUCTION:"
+
+      case_lowercase_headers:
+        name: "Lowercase Headers"
+        category: "format"
+        description: "Convert section headers to lowercase"
+        type: "deterministic"
+        applicable_domains: ["long_context"]
+        required_features: ["has_headers"]
+        examples:
+          - before: "INTRODUCTION:"
+            after: "introduction:"
+
+      # --- Positioning Transformations (LLM) ---
+      section_reverse:
+        name: "Reverse Sections"
+        category: "positioning"
+        description: "Reverse the order of all major sections"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["has_sections", "is_long"]
+        examples:
+          - before: "Section A... Section B... Section C..."
+            after: "Section C... Section B... Section A..."
+        system_prompt: |
+          Reverse the order of all sections in this context.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Keep ALL content - just reverse section order
+          3. Don't modify section contents, only reorder them
+        user_prompt_template: |
+          CONTEXT:
+          {context}
+
+          QUERY:
+          {query}
+
+          ANSWER (MUST remain):
+          {answer}
+
+          Reverse all sections. Provide in <context> tags.
+
+      paragraph_reverse:
+        name: "Reverse Paragraphs"
+        category: "positioning"
+        description: "Reverse the order of paragraphs"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["has_paragraphs", "is_long"]
+        examples:
+          - before: "Para 1... Para 2... Para 3..."
+            after: "Para 3... Para 2... Para 1..."
+        system_prompt: |
+          Reverse the order of paragraphs in this context.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Keep ALL content - just reverse paragraph order
+        user_prompt_template: |
+          Reverse paragraph order in this context:
+
+          {context}
+
+      examples_first:
+        name: "Move Examples First"
+        category: "positioning"
+        description: "Move example sections to the beginning"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["has_examples", "is_long"]
+        system_prompt: |
+          Move all examples/demonstrations to the beginning of the context.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Keep ALL content - just reorder sections
+        user_prompt_template: |
+          Move examples to the start of this context:
+
+          {context}
+
+      # --- Content Transformations (LLM) ---
+      drop_examples:
+        name: "Drop Examples"
+        category: "content"
+        description: "Remove example sections while keeping essential information"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["has_examples", "is_long"]
+        system_prompt: |
+          Remove example sections while keeping essential information.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Remove only redundant examples - keep essential info
+          3. Preserve all facts needed to answer the query
+        user_prompt_template: |
+          Remove examples from this context:
+
+          {context}
+
+      improve_clarity:
+        name: "Improve Clarity"
+        category: "quality"
+        description: "Make unclear or ambiguous parts clearer"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["is_long"]
+        system_prompt: |
+          Improve clarity in this context with MINIMAL changes.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Only make unclear parts clearer
+          3. All facts must remain unchanged
+        user_prompt_template: |
+          Improve clarity in this context:
+
+          {context}
+
+      resolve_ambiguity:
+        name: "Resolve Ambiguity"
+        category: "quality"
+        description: "Make ambiguous references explicit (pronouns, 'this', 'it')"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["has_pronouns", "is_long"]
+        system_prompt: |
+          Resolve ambiguous references in this context.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Change "it" -> explicit noun, "this" -> "this X", etc.
+          3. All facts must remain unchanged
+        user_prompt_template: |
+          Resolve ambiguous references:
+
+          {context}
+
+      add_redundancy:
+        name: "Add Redundancy"
+        category: "quality"
+        description: "Add clarifying repetition of key points"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["is_long"]
+        system_prompt: |
+          Add clarifying redundancy to this context.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Add helpful repetition - don't change facts
+        user_prompt_template: |
+          Add helpful redundancy to key points:
+
+          {context}
+
+      remove_redundancy:
+        name: "Remove Redundancy"
+        category: "quality"
+        description: "Remove repetitive information while preserving unique facts"
+        type: "llm"
+        applicable_domains: ["long_context"]
+        required_features: ["is_long"]
+        system_prompt: |
+          Remove redundant information from this context.
+
+          CRITICAL CONSTRAINTS:
+          1. The answer MUST stay exactly the same
+          2. Keep all unique facts - remove only redundancy
+        user_prompt_template: |
+          Remove redundancy from this context:
+
+          {context}
+
+# =============================================================================
+# FEATURE DETECTION PATTERNS
+# =============================================================================
+feature_patterns:
+  has_numbers: "\\d+"
+  has_fraction: "\\d+/\\d+"
+  has_decimal: "\\d+\\.\\d+"
+  has_percentage: "\\d+%|percent"
+  has_time_12hr: "\\d{1,2}:\\d{2}\\s*(AM|PM|am|pm)"
+  has_time_24hr: "\\b([01]?\\d|2[0-3]):[0-5]\\d\\b"
+  has_date: "\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}|\\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\w*\\s+\\d{1,2}"
+  has_duration: "\\d+\\s*(hour|minute|second|day|week|month|year)s?"
+  has_temporal_reference: "\\b(ago|later|before|after|yesterday|today|tomorrow)\\b"
+  has_entities: "\\b[A-Z][a-z]+\\b"  # Simplified - use NER for production
+  has_quotes: "['\"]"
+  has_headers: "^[A-Z][A-Z\\s]+:$"
+  has_sections: "\\n\\n"
+  has_paragraphs: "\\n\\n"
+  has_pronouns: "\\b(it|this|that|they|them|he|she)\\b"
+  has_code_syntax: "(def |class |import |function |var |const |let )"
+  is_long: "length > 500"
+  has_number_words: "\\b(one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|forty|fifty|hundred|thousand)\\b"
+  has_math_operations: "[+\\-*/=<>]|plus|minus|times|divided|equals"
+  has_units: "\\b(km|miles|kg|pounds|meters|feet|celsius|fahrenheit)\\b"
+
+# =============================================================================
+# DOMAIN DETECTION RULES
+# =============================================================================
+domain_detection:
+  math:
+    patterns: ["\\d+\\s*[+\\-*/=]\\s*\\d+", "calculate|compute|solve|find|what is"]
+    keywords: ["sum", "product", "quotient", "area", "volume", "equation"]
+  temporal:
+    patterns: ["\\d+:\\d+", "\\d+\\s*(hour|minute|day|week|month|year)"]
+    keywords: ["when", "time", "date", "schedule", "duration", "ago", "later"]
+  code:
+    patterns: ["def\\s+\\w+", "class\\s+\\w+", "function\\s+\\w+", "import\\s+"]
+    keywords: ["code", "program", "function", "variable", "output"]
+  long_context:
+    patterns: []
+    conditions: ["length > 500"]
+  reasoning:
+    keywords: ["if", "then", "because", "therefore", "conclude", "implies"]
+  general:
+    fallback: true
