@@ -33,6 +33,13 @@ dependencies = [
     "tqdm>=4.60.0",
     "pyyaml>=5.4.0",
     "requests>=2.25.0",
+    "pint>=0.20",
+    "scipy>=1.7.0",
+    "networkx>=2.6",
+    "sympy>=1.9",
+    "spacy[lookups]>=3.8.0,<3.9.0",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "nltk>=3.7",
 ]
 
 [project.optional-dependencies]
@@ -51,4 +58,4 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["pipeline*", "models*", "eval*"]
+include = ["benchdrift*"]

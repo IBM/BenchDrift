@@ -10,6 +10,10 @@ BenchDrift generates syntactic variations of test problems (same meaning, differ
 
 **Example:** Your model solves "What is 15 + 25?" correctly but fails on "Calculate the sum of 15 and 25" — BenchDrift finds these inconsistencies automatically. Use it to discover edge cases, test robustness, compare models, debug failures, and validate prompts.
 
+<p align="left">
+  <img src="figures/overview.png" width="40%" height="auto" alt="System Overview"/>
+</p>
+
 ## Demo
 
 https://github.com/user-attachments/assets/76effad5-44b8-445c-9eef-06b8d6bfd90c
