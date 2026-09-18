@@ -43,28 +43,31 @@ except ImportError:
 
 # RITS configuration - always available (uses requests)
 RITS_AVAILABLE = True
-# RITS_API_KEY = "REDACTED"  # Commented out - use environment variable
-RITS_API_KEY = os.getenv("RITS_API_KEY", "REDACTED")  # Read from env, fallback to empty
-RITS_MODELS = {
-    "llama-3-1-8b": {"endpoint": "REDACTED_ENDPOINT", "name": "meta-llama/Llama-3.1-8B-Instruct"},
-    "granite-3-1-8b": {"endpoint": "REDACTED_ENDPOINT", "name": "ibm-granite/granite-3.1-8b-instruct"},
-    "granite-3-0-8b": {"endpoint": "REDACTED_ENDPOINT", "name": "ibm-granite/granite-3.0-8b-instruct"},
-    "granite-3-3-8b": {"endpoint": "REDACTED_ENDPOINT", "name": "ibm-granite/granite-3.3-8b-instruct"},
-    "phi-4": {"endpoint": "REDACTED_ENDPOINT", "name": "microsoft/phi-4"},
-    "phi-4-reasoning": {"endpoint": "REDACTED_ENDPOINT", "name": "microsoft/Phi-4-reasoning"},
-    "franconia": {"endpoint": "REDACTED_ENDPOINT", "name": "ibm-granite/REDACTED_MODEL"},
-    "openoss": {"endpoint":"REDACTED_ENDPOINT","name":"openai/gpt-oss-120b"},
-    "llama_3_3_70b": {"endpoint":"REDACTED_ENDPOINT" , "name":"meta-llama/llama-3-3-70b-instruct"},
-    "gpt_oss_20b": {"endpoint":"REDACTED_ENDPOINT", "name":"openai/gpt-oss-20b"},
-    "mistral_small_3_2_instruct": {"endpoint":"REDACTED_ENDPOINT", "name":"mistralai/Mistral-Small-3.2-24B-Instruct-2506"},
-    "qwen_3_8b": {"endpoint":"REDACTED_ENDPOINT","name":"Qwen/Qwen3-8B"},
-    "granite-4-small":{"endpoint":"REDACTED_ENDPOINT","name":"ibm-granite/granite-4.0-h-small"},
-    "qwen-3-8b":{"endpoint":"REDACTED_ENDPOINT","name":"Qwen/Qwen3-8B"},
-    "granite-4-micro":{"endpoint":"REDACTED_ENDPOINT","name":"ibm-granite/granite-4.0-micro"},
-    "granite-4-8b":{"endpoint":"REDACTED_ENDPOINT","name":"ibm-granite/granite-4.0-8b"}
+# Read the RITS credential from the environment. No default is provided: a
+# fallback value would be committed to source control and would let the client
+# authenticate with someone else's key when the variable is unset.
+#   export RITS_API_KEY="your-rits-api-key"
+RITS_API_KEY = os.getenv("RITS_API_KEY", "")
+# RITS endpoints are internal infrastructure and are not published here. Point
+# RITS_MODELS_CONFIG at a local JSON file to use the RITS client, e.g.
+#   export RITS_MODELS_CONFIG=/path/to/rits_models.json
+# with the shape:
+#   {"model-key": {"endpoint": "https://<host>/<path>", "name": "<hf-model-id>"}}
+# Without it, RITS_MODELS is empty and only the VLLM and Gemini clients are
+# available; requesting a RITS model raises a ValueError listing what is loaded.
+def _load_rits_models() -> dict:
+    path = os.getenv("RITS_MODELS_CONFIG", "")
+    if not path:
+        return {}
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not load RITS_MODELS_CONFIG from %s: %s", path, exc)
+        return {}
 
 
-}
+RITS_MODELS = _load_rits_models()
 
 RITS_CHAT_ENDPOINT = "/v1/chat/completions"
 RITS_HEADERS = {
